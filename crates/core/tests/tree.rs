@@ -1,10 +1,10 @@
 use jiff::Timestamp;
 use tack_core::ErrorKind;
 use tack_core::api::{CreateItem, CreateStatus, PatchItem, PatchStatus};
-use tack_core::model::{Category, ItemId, Priority, Status, StatusId};
+use tack_core::model::{Category, ItemId, Status, StatusId};
 use tack_core::path::Target;
 use tack_core::query::Query;
-use tack_core::tree::Tree;
+use tack_core::tree::{Tree, Updated};
 
 fn seed_statuses() -> Vec<Status> {
     let status = |id, name: &str, category, position| Status {
@@ -43,7 +43,7 @@ impl Harness {
         let now = self.now();
         let created = self.tree.add(
             &CreateItem {
-                title: title.into(),
+                path: title.into(),
                 ..Default::default()
             },
             now,
@@ -55,13 +55,13 @@ impl Harness {
         self.try_add(title).unwrap()
     }
 
-    fn try_patch(&mut self, target: &str, patch: PatchItem) -> tack_core::Result<bool> {
+    fn try_patch(&mut self, target: &str, patch: PatchItem) -> tack_core::Result<Updated> {
         let id = self.id(target);
         let now = self.now();
         self.tree.update(id, &patch, now)
     }
 
-    fn set_status(&mut self, target: &str, status: &str) -> tack_core::Result<bool> {
+    fn set_status(&mut self, target: &str, status: &str) -> tack_core::Result<Updated> {
         self.try_patch(
             target,
             PatchItem {
@@ -138,26 +138,9 @@ fn a_done_item_frees_its_name_for_the_next_one() {
 }
 
 #[test]
-fn creation_under_a_parent_target_and_under_a_done_parent() {
+fn adding_below_a_done_item_starts_a_fresh_one() {
     let mut h = Harness::new();
-    h.add("home/weekly");
-    let now = h.now();
-    h.tree
-        .add(
-            &CreateItem {
-                title: "renovations/kitchen".into(),
-                parent: Some("home/weekly".parse().unwrap()),
-                ..Default::default()
-            },
-            now,
-        )
-        .unwrap();
-    assert!(
-        h.paths("")
-            .contains(&"home/weekly/renovations/kitchen".to_string())
-    );
-
-    let weekly = h.id("home/weekly");
+    h.add("home/weekly/buy groceries");
     h.try_patch(
         "home/weekly",
         PatchItem {
@@ -167,18 +150,9 @@ fn creation_under_a_parent_target_and_under_a_done_parent() {
         },
     )
     .unwrap();
-    let err = h
-        .tree
-        .add(
-            &CreateItem {
-                title: "x".into(),
-                parent: Some(Target::Id(weekly)),
-                ..Default::default()
-            },
-            now,
-        )
-        .unwrap_err();
-    assert_eq!(err.kind, ErrorKind::Conflict);
+    h.add("home/weekly/clean");
+    assert_eq!(h.paths(""), ["home", "home/weekly", "home/weekly/clean"]);
+    assert_eq!(h.paths("is:all weekly").len(), 4);
 }
 
 #[test]
@@ -207,8 +181,7 @@ fn rename_and_move_rewrite_every_descendant_path() {
     h.try_patch(
         "home/weekly/renovations",
         PatchItem {
-            title: Some("Flat".into()),
-            parent: Some(Some("work".parse().unwrap())),
+            path: Some("work/Flat".into()),
             ..Default::default()
         },
     )
@@ -227,6 +200,46 @@ fn rename_and_move_rewrite_every_descendant_path() {
 }
 
 #[test]
+fn moving_creates_missing_parents_but_not_inside_itself() {
+    let mut h = Harness::new();
+    h.add("home/weekly/renovations/kitchen");
+    let updated = h
+        .try_patch(
+            "home/weekly/renovations",
+            PatchItem {
+                path: Some("archive/2026/flat".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(updated.changed);
+    assert_eq!(updated.created.len(), 2);
+    assert_eq!(
+        h.paths(""),
+        [
+            "archive",
+            "archive/2026",
+            "archive/2026/flat",
+            "archive/2026/flat/kitchen",
+            "home",
+            "home/weekly",
+        ]
+    );
+
+    let before = h.tree.clone();
+    let into_self = h.try_patch(
+        "archive",
+        PatchItem {
+            path: Some("archive/2026/new/archive".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(into_self.unwrap_err().kind, ErrorKind::Conflict);
+    assert_eq!(h.tree, before);
+    h.assert_matches_rebuild();
+}
+
+#[test]
 fn moves_into_own_subtree_or_onto_an_open_name_conflict() {
     let mut h = Harness::new();
     h.add("home/weekly/renovations");
@@ -234,7 +247,7 @@ fn moves_into_own_subtree_or_onto_an_open_name_conflict() {
     let into_self = h.try_patch(
         "home",
         PatchItem {
-            parent: Some(Some("home/weekly/renovations".parse().unwrap())),
+            path: Some("home/weekly/renovations/home".into()),
             ..Default::default()
         },
     );
@@ -242,7 +255,7 @@ fn moves_into_own_subtree_or_onto_an_open_name_conflict() {
     let onto_name = h.try_patch(
         "work/weekly",
         PatchItem {
-            parent: Some(Some("home".parse().unwrap())),
+            path: Some("home/weekly".into()),
             ..Default::default()
         },
     );
@@ -306,7 +319,7 @@ fn status_changes_stamp_times_and_noop_patches_report_no_change() {
     let mut h = Harness::new();
     let id = h.add("home/fix wifi");
     let now = h.now();
-    let changed = h
+    let updated = h
         .tree
         .update(
             id,
@@ -318,14 +331,19 @@ fn status_changes_stamp_times_and_noop_patches_report_no_change() {
             now,
         )
         .unwrap();
-    assert!(changed);
+    assert!(updated.changed);
     let item = h.tree.get(id).unwrap().item.clone();
     assert_eq!(item.started_at, Some(now));
     assert_eq!(item.updated_at, now);
     assert_eq!(item.tags, ["net"]);
 
     let later = h.now();
-    assert!(!h.tree.update(id, &PatchItem::default(), later).unwrap());
+    assert!(
+        !h.tree
+            .update(id, &PatchItem::default(), later)
+            .unwrap()
+            .changed
+    );
     assert_eq!(h.tree.get(id).unwrap().item.updated_at, now);
 }
 
@@ -363,9 +381,8 @@ fn list_words_operators_and_subtrees() {
     h.tree
         .add(
             &CreateItem {
-                title: "home/weekly/renovations/kitchen".into(),
+                path: "home/weekly/renovations/kitchen".into(),
                 tags: vec!["diy".into()],
-                priority: Some(Priority::new(2).unwrap()),
                 ..Default::default()
             },
             now,
@@ -380,21 +397,19 @@ fn list_words_operators_and_subtrees() {
     assert_eq!(h.paths("groc weekly"), ["home/weekly/buy_groceries"]);
     assert_eq!(h.paths("\"weekly report\""), ["work/weekly_report"]);
     assert_eq!(h.paths("weekly -home"), ["work/weekly_report"]);
+    assert_eq!(h.paths("+diy"), ["home/weekly/renovations/kitchen"]);
     assert_eq!(
-        h.paths("under:home/weekly/renovations"),
-        ["home/weekly/renovations", "home/weekly/renovations/kitchen"]
+        h.paths("tag:diy kitchen"),
+        ["home/weekly/renovations/kitchen"]
     );
-    assert_eq!(h.paths("!2 +diy"), ["home/weekly/renovations/kitchen"]);
     assert_eq!(h.paths("status:progress"), Vec::<String>::new());
 }
 
 #[test]
-fn list_reports_unknown_status_and_missing_under_path() {
+fn list_reports_unknown_status() {
     let h = Harness::new();
     let unknown = h.tree.list(&Query::parse("status:blocked").unwrap());
     assert_eq!(unknown.unwrap_err().kind, ErrorKind::Invalid);
-    let missing = h.tree.list(&Query::parse("under:nowhere").unwrap());
-    assert_eq!(missing.unwrap_err().kind, ErrorKind::NotFound);
 }
 
 #[test]
@@ -484,14 +499,19 @@ fn incremental_updates_match_a_full_rebuild() {
             6 | 7 if !ids.is_empty() => {
                 let id = pick(next(ids.len()));
                 let now = h.now();
-                let parent = if next(4) == 0 {
-                    None
+                let title = if next(2) == 0 {
+                    words[next(words.len())].to_string()
                 } else {
-                    Some(Target::Id(pick(next(ids.len()))))
+                    h.tree.get(id).unwrap().item.title.clone()
+                };
+                let path = if next(4) == 0 {
+                    title
+                } else {
+                    let parent = pick(next(ids.len()));
+                    format!("{}/{}", h.tree.get(parent).unwrap().path, title)
                 };
                 let patch = PatchItem {
-                    parent: Some(parent),
-                    title: (next(2) == 0).then(|| words[next(words.len())].to_string()),
+                    path: Some(path),
                     ..Default::default()
                 };
                 let _ = h.tree.update(id, &patch, now);

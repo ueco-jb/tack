@@ -1,5 +1,5 @@
-use crate::model::{ItemId, Priority, normalize_tag};
-use crate::path::{Target, normalize_word};
+use crate::model::{ItemId, normalize_tag};
+use crate::path::normalize_word;
 use crate::tree::Tree;
 use crate::{Error, Result};
 
@@ -15,14 +15,12 @@ pub enum Is {
 pub struct Query {
     pub words: Vec<String>,
     pub without: Vec<String>,
-    pub under: Option<Target>,
     pub status: Option<String>,
     pub tags: Vec<String>,
-    pub priority: Option<Priority>,
     pub is: Is,
 }
 
-const KEYS: [&str; 5] = ["is", "under", "status", "tag", "prio"];
+const KEYS: [&str; 3] = ["is", "status", "tag"];
 
 impl Query {
     pub fn parse(input: &str) -> Result<Query> {
@@ -34,11 +32,6 @@ impl Query {
                 push_word(&mut q.words, &token);
             } else if let Some(tag) = token.strip_prefix('+').filter(|t| !t.is_empty()) {
                 q.tags.push(normalize_tag(tag)?);
-            } else if let Some(p) = token
-                .strip_prefix('!')
-                .filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-            {
-                q.priority = Some(p.parse()?);
             } else if let Some((key, value)) = token.split_once(':')
                 && KEYS.contains(&key.to_lowercase().as_str())
             {
@@ -47,10 +40,8 @@ impl Query {
                 }
                 match key.to_lowercase().as_str() {
                     "is" => q.is = parse_is(value)?,
-                    "under" => q.under = Some(value.parse()?),
                     "status" => q.status = Some(value.to_lowercase()),
-                    "tag" => q.tags.push(normalize_tag(value)?),
-                    _ => q.priority = Some(value.parse()?),
+                    _ => q.tags.push(normalize_tag(value)?),
                 }
             } else {
                 push_word(&mut q.words, &token);
@@ -106,11 +97,6 @@ fn tokenize(input: &str) -> Vec<(String, bool)> {
 
 impl Tree {
     pub fn list(&self, query: &Query) -> Result<Vec<ItemId>> {
-        let under = query
-            .under
-            .as_ref()
-            .map(|t| self.find(t).map(|n| n.item.id))
-            .transpose()?;
         let status = query
             .status
             .as_deref()
@@ -126,13 +112,11 @@ impl Tree {
                 };
                 is && query.words.iter().all(|w| node.path.contains(w.as_str()))
                     && !query.without.iter().any(|w| node.path.contains(w.as_str()))
-                    && under.is_none_or(|a| self.is_within(node.item.id, a))
                     && status.is_none_or(|s| node.item.status == s)
                     && query
                         .tags
                         .iter()
                         .all(|t| node.item.tags.binary_search(t).is_ok())
-                    && query.priority.is_none_or(|p| node.item.priority == p)
             })
             .map(|node| node.item.id)
             .collect())
@@ -145,22 +129,18 @@ mod tests {
 
     #[test]
     fn parses_words_operators_and_negation() {
-        let q = Query::parse(
-            r#"weekly -work +food !2 status:Progress under:home is:all "buy  groceries""#,
-        )
-        .unwrap();
+        let q =
+            Query::parse(r#"weekly -work +food status:Progress is:all "buy  groceries""#).unwrap();
         assert_eq!(q.words, ["weekly", "buy_groceries"]);
         assert_eq!(q.without, ["work"]);
         assert_eq!(q.tags, ["food"]);
-        assert_eq!(q.priority, Some(Priority::new(2).unwrap()));
         assert_eq!(q.status.as_deref(), Some("progress"));
-        assert_eq!(q.under, Some("home".parse().unwrap()));
         assert_eq!(q.is, Is::All);
     }
 
     #[test]
     fn unfinished_operators_are_ignored_while_typing() {
-        assert_eq!(Query::parse("status: under:").unwrap(), Query::default());
+        assert_eq!(Query::parse("status: is:").unwrap(), Query::default());
     }
 
     #[test]
@@ -171,8 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_values_are_errors() {
-        assert!(Query::parse("!7").is_err());
+    fn invalid_is_value_is_an_error() {
         assert!(Query::parse("is:maybe").is_err());
     }
 }

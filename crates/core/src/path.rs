@@ -70,6 +70,14 @@ impl ItemPath {
     pub fn segments(&self) -> &[String] {
         &self.0
     }
+
+    pub fn title(&self) -> &str {
+        self.0.last().expect("parse rejects empty paths")
+    }
+
+    pub fn parent(&self) -> Option<ItemPath> {
+        (self.0.len() > 1).then(|| ItemPath(self.0[..self.0.len() - 1].to_vec()))
+    }
 }
 
 impl fmt::Display for ItemPath {

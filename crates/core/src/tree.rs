@@ -4,13 +4,18 @@ use jiff::Timestamp;
 
 use crate::api::{CreateItem, CreateStatus, ItemView, PatchItem, PatchStatus};
 use crate::model::{
-    Category, Item, ItemId, Priority, Status, StatusId, normalize_status_name, normalize_tags,
-    transition,
+    Category, Item, ItemId, Status, StatusId, normalize_status_name, normalize_tags, transition,
 };
-use crate::path::{ItemPath, Target, name_of, normalize_title};
+use crate::path::{ItemPath, Target, name_of};
 use crate::{Error, Result};
 
 pub const MAX_LABEL_CHARS: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Updated {
+    pub changed: bool,
+    pub created: Vec<ItemId>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
@@ -191,17 +196,7 @@ impl Tree {
             title: item.title.clone(),
             body: item.body.clone(),
             status: status.name.clone(),
-            category: status.category,
-            priority: item.priority,
             tags: item.tags.clone(),
-            depth: node.depth,
-            open: node.open,
-            children_open: node
-                .children
-                .iter()
-                .filter(|c| self.nodes[c].item.done_at.is_none())
-                .count(),
-            children_total: node.children.len(),
             created_at: item.created_at,
             updated_at: item.updated_at,
             started_at: item.started_at,
@@ -210,7 +205,7 @@ impl Tree {
     }
 
     pub fn add(&mut self, req: &CreateItem, now: Timestamp) -> Result<Vec<ItemId>> {
-        let path = ItemPath::parse(&req.title)?;
+        let path = ItemPath::parse(&req.path)?;
         let status = match &req.status {
             Some(name) => self.status_by_name(name)?,
             None => self.first_status(Category::Todo)?,
@@ -219,96 +214,59 @@ impl Tree {
         let default_status = self.first_status(Category::Todo)?.id;
         let tags = normalize_tags(&req.tags)?;
 
-        let mut cursor = match &req.parent {
-            None => None,
-            Some(target) => {
-                let parent = self.find(target)?;
-                if !parent.open {
-                    return Err(Error::conflict(format!(
-                        "{} is done; reopen it before adding under it",
-                        parent.path
-                    )));
-                }
-                Some(parent.item.id)
-            }
-        };
         let segments = path.segments();
-        let mut first_new = 0;
-        while let Some(existing) = self.find_live_child(cursor, &name_of(&segments[first_new])) {
-            if first_new + 1 == segments.len() {
-                return Err(Error::conflict(format!(
-                    "an open item already exists at {}",
-                    self.nodes[&existing].path
-                )));
-            }
-            cursor = Some(existing);
-            first_new += 1;
+        let (cursor, found) = self.existing_prefix(segments);
+        if found == segments.len() {
+            return Err(Error::conflict(format!(
+                "an open item already exists at {path}"
+            )));
         }
-
-        let mut created = Vec::new();
-        for (index, segment) in segments.iter().enumerate().skip(first_new) {
-            let id = ItemId(self.next_item_id);
-            self.next_item_id += 1;
-            let is_target = index + 1 == segments.len();
-            let item = Item {
-                id,
-                parent: cursor,
-                title: segment.clone(),
-                body: if is_target {
-                    req.body.clone().unwrap_or_default()
-                } else {
-                    String::new()
-                },
-                status: if is_target { status_id } else { default_status },
-                priority: if is_target {
-                    req.priority.unwrap_or_default()
-                } else {
-                    Priority::default()
-                },
-                tags: if is_target { tags.clone() } else { Vec::new() },
-                created_at: now,
-                updated_at: now,
-                started_at: (is_target && category == Category::Active).then_some(now),
-                done_at: (is_target && category == Category::Done).then_some(now),
-            };
-            self.nodes.insert(id, Node::detached(item));
-            self.insert_child(cursor, id);
-            self.refresh_subtree(id);
-            cursor = Some(id);
-            created.push(id);
-        }
+        let (parent, mut created) = self.create_parents(
+            cursor,
+            &segments[found..segments.len() - 1],
+            default_status,
+            now,
+        );
+        let id = self.take_id();
+        self.insert_item(Item {
+            id,
+            parent,
+            title: path.title().to_owned(),
+            body: req.body.clone().unwrap_or_default(),
+            status: status_id,
+            tags,
+            created_at: now,
+            updated_at: now,
+            started_at: (category == Category::Active).then_some(now),
+            done_at: (category == Category::Done).then_some(now),
+        });
+        created.push(id);
         self.rebuild_order();
         Ok(created)
     }
 
-    pub fn update(&mut self, id: ItemId, patch: &PatchItem, now: Timestamp) -> Result<bool> {
-        let node = self.node(id)?;
-        let old = &node.item;
+    pub fn update(&mut self, id: ItemId, patch: &PatchItem, now: Timestamp) -> Result<Updated> {
+        let old = self.node(id)?.item.clone();
         let mut new = old.clone();
+        let mut missing_parents = Vec::new();
+        let mut existing_parent = old.parent;
 
-        if let Some(raw) = &patch.title {
-            new.title = normalize_title(raw)?;
-        }
-        if let Some(target) = &patch.parent {
-            new.parent = match target {
-                None => None,
-                Some(target) => {
-                    let parent = self.find(target)?;
-                    if self.is_within(parent.item.id, id) {
-                        return Err(Error::conflict(format!(
-                            "cannot move {} into itself or its own subtree",
-                            node.path
-                        )));
-                    }
-                    if !parent.open {
-                        return Err(Error::conflict(format!(
-                            "{} is done; reopen it before moving items under it",
-                            parent.path
-                        )));
-                    }
-                    Some(parent.item.id)
-                }
-            };
+        if let Some(raw) = &patch.path {
+            let path = ItemPath::parse(raw)?;
+            let parents = &path.segments()[..path.segments().len() - 1];
+            let (cursor, found) = self.existing_prefix(parents);
+            if let Some(c) = cursor
+                && self.is_within(c, id)
+            {
+                return Err(Error::conflict(format!(
+                    "cannot move {} into itself or its own subtree",
+                    self.nodes[&id].path
+                )));
+            }
+            existing_parent = cursor;
+            missing_parents = parents[found..].to_vec();
+            new.parent = cursor;
+            new.title = path.title().to_owned();
         }
         if let Some(name) = &patch.status {
             let to = self.status_by_name(name)?;
@@ -321,7 +279,7 @@ impl Tree {
                 {
                     return Err(Error::conflict(format!(
                         "{} still has open items under it; force it to mark it done anyway",
-                        node.path
+                        self.nodes[&id].path
                     )));
                 }
                 transition(&mut new, from.category, to.category, now);
@@ -331,14 +289,14 @@ impl Tree {
         if let Some(body) = &patch.body {
             new.body = body.clone();
         }
-        if let Some(priority) = patch.priority {
-            new.priority = priority;
-        }
         if let Some(tags) = &patch.tags {
             new.tags = normalize_tags(tags)?;
         }
-        if new == *old {
-            return Ok(false);
+        if new == old && missing_parents.is_empty() {
+            return Ok(Updated {
+                changed: false,
+                created: Vec::new(),
+            });
         }
 
         let reappears = new.title != old.title
@@ -346,6 +304,7 @@ impl Tree {
             || (old.done_at.is_some() && new.done_at.is_none());
         if new.done_at.is_none()
             && reappears
+            && missing_parents.is_empty()
             && let Some(other) = self.find_live_child(new.parent, &name_of(&new.title))
             && other != id
         {
@@ -354,14 +313,19 @@ impl Tree {
                 self.nodes[&other].path
             )));
         }
+        let default_status = self.first_status(Category::Todo)?.id;
 
+        let (parent, created) =
+            self.create_parents(existing_parent, &missing_parents, default_status, now);
+        if !missing_parents.is_empty() {
+            new.parent = parent;
+        }
         new.updated_at = now;
-        let old_parent = old.parent;
         let restructured = old.parent != new.parent || old.title != new.title;
         let done_changed = old.done_at.is_some() != new.done_at.is_some();
         let new_parent = new.parent;
         if restructured {
-            self.remove_child(old_parent, id);
+            self.remove_child(old.parent, id);
         }
         let node = self.nodes.get_mut(&id).expect("checked above");
         node.name = name_of(&new.title).into_boxed_str();
@@ -375,7 +339,63 @@ impl Tree {
         if restructured {
             self.rebuild_order();
         }
-        Ok(true)
+        Ok(Updated {
+            changed: true,
+            created,
+        })
+    }
+
+    fn existing_prefix(&self, segments: &[String]) -> (Option<ItemId>, usize) {
+        let mut cursor = None;
+        let mut found = 0;
+        while found < segments.len()
+            && let Some(next) = self.find_live_child(cursor, &name_of(&segments[found]))
+        {
+            cursor = Some(next);
+            found += 1;
+        }
+        (cursor, found)
+    }
+
+    fn create_parents(
+        &mut self,
+        mut cursor: Option<ItemId>,
+        titles: &[String],
+        status: StatusId,
+        now: Timestamp,
+    ) -> (Option<ItemId>, Vec<ItemId>) {
+        let mut created = Vec::with_capacity(titles.len());
+        for title in titles {
+            let id = self.take_id();
+            self.insert_item(Item {
+                id,
+                parent: cursor,
+                title: title.clone(),
+                body: String::new(),
+                status,
+                tags: Vec::new(),
+                created_at: now,
+                updated_at: now,
+                started_at: None,
+                done_at: None,
+            });
+            cursor = Some(id);
+            created.push(id);
+        }
+        (cursor, created)
+    }
+
+    fn take_id(&mut self) -> ItemId {
+        let id = ItemId(self.next_item_id);
+        self.next_item_id += 1;
+        id
+    }
+
+    fn insert_item(&mut self, item: Item) {
+        let (id, parent) = (item.id, item.parent);
+        self.nodes.insert(id, Node::detached(item));
+        self.insert_child(parent, id);
+        self.refresh_subtree(id);
     }
 
     pub fn remove(&mut self, id: ItemId, recursive: bool) -> Result<Vec<ItemId>> {

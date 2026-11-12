@@ -67,55 +67,6 @@ impl FromStr for Category {
     }
 }
 
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(try_from = "u8", into = "u8")]
-pub struct Priority(u8);
-
-impl Priority {
-    pub const MAX: u8 = 3;
-
-    pub fn new(value: u8) -> Result<Self> {
-        if value > Self::MAX {
-            return Err(Error::invalid(format!(
-                "priority {value} is out of range 0..={}",
-                Self::MAX
-            )));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn get(self) -> u8 {
-        self.0
-    }
-}
-
-impl TryFrom<u8> for Priority {
-    type Error = Error;
-
-    fn try_from(value: u8) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl From<Priority> for u8 {
-    fn from(p: Priority) -> u8 {
-        p.0
-    }
-}
-
-impl FromStr for Priority {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        let value: u8 = s
-            .parse()
-            .map_err(|_| Error::invalid(format!("priority {s:?} is not a number 0..=3")))?;
-        Self::new(value)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     pub id: StatusId,
@@ -132,7 +83,6 @@ pub struct Item {
     pub title: String,
     pub body: String,
     pub status: StatusId,
-    pub priority: Priority,
     pub tags: Vec<String>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -216,7 +166,6 @@ mod tests {
             title: "x".into(),
             body: String::new(),
             status: StatusId(1),
-            priority: Priority::default(),
             tags: vec![],
             created_at: Timestamp::UNIX_EPOCH,
             updated_at: Timestamp::UNIX_EPOCH,
