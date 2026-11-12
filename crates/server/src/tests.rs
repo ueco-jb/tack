@@ -108,22 +108,54 @@ fn kind(body: &Value) -> &str {
 }
 
 #[tokio::test]
-async fn first_client_is_adopted_and_every_other_is_forbidden() {
+async fn allowlist_is_opt_in_and_only_changed_from_the_server_itself() {
     let h = Harness::new();
+    const PI: &str = "127.0.0.1";
+    for client in [LAPTOP, PHONE] {
+        let (status, _) = h.send_from(client, Method::GET, "/health", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{client} without an allowlist");
+    }
+
+    let allow_laptop = Some(json!({ "ip": LAPTOP }));
+    let (status, body) = h.send(Method::POST, "/clients", allow_laptop.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "only the server itself");
+    assert_eq!(kind(&body), "forbidden");
+
+    let (status, body) = h
+        .send_from(PI, Method::POST, "/clients", allow_laptop, &[])
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "clients": [LAPTOP] }));
+
     let (status, _) = h.send(Method::GET, "/health", None).await;
     assert_eq!(status, StatusCode::OK);
-
     let (status, body) = h.send_from(PHONE, Method::GET, "/health", None, &[]).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(kind(&body), "forbidden");
-
-    let (status, _) = h
-        .send_from("127.0.0.1", Method::GET, "/health", None, &[])
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "loopback is not special");
+    let (status, _) = h.send_from(PI, Method::GET, "/health", None, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the server itself is always allowed"
+    );
 
     let stored = h.server.storage().allowed_clients().unwrap();
     assert_eq!(stored, [LAPTOP.parse::<IpAddr>().unwrap()]);
+
+    let (status, _) = h
+        .send_from(PI, Method::DELETE, &format!("/clients/{PHONE}"), None, &[])
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) = h
+        .send_from(PI, Method::DELETE, &format!("/clients/{LAPTOP}"), None, &[])
+        .await;
+    assert_eq!((status, body), (StatusCode::OK, json!({ "clients": [] })));
+    let (status, _) = h.send_from(PHONE, Method::GET, "/health", None, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an emptied allowlist allows everyone"
+    );
 }
 
 #[tokio::test]

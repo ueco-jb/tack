@@ -1,16 +1,17 @@
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
-use axum::extract::{self, Json, State};
+use axum::extract::{self, ConnectInfo, Json, State};
 use axum::http::StatusCode;
 use axum::middleware;
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use serde::Deserialize;
 use tack_core::Error;
 use tack_core::api::{
-    API_PREFIX, CreateItem, CreateStatus, Deleted, Health, ItemList, ItemView, PatchItem,
-    PatchStatus, PatchTag, StatusList, TagList,
+    API_PREFIX, AllowClient, ClientList, CreateItem, CreateStatus, Deleted, Health, ItemList,
+    ItemView, PatchItem, PatchStatus, PatchTag, StatusList, TagList,
 };
 use tack_core::model::{Status, Tag};
 use tack_core::path::Target;
@@ -31,7 +32,9 @@ pub fn router(server: Arc<Server>) -> Router {
             patch(update_status).delete(remove_status),
         )
         .route("/tags", get(tags))
-        .route("/tags/{name}", patch(update_tag).delete(remove_tag));
+        .route("/tags/{name}", patch(update_tag).delete(remove_tag))
+        .route("/clients", get(clients).post(allow_client))
+        .route("/clients/{ip}", delete(deny_client));
     Router::new()
         .route("/", get(web::index))
         .route(
@@ -225,4 +228,41 @@ async fn remove_tag(
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn clients(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> ApiResult<Json<ClientList>> {
+    hosts::require_loopback(peer)?;
+    Ok(Json(ClientList {
+        clients: server.clients(),
+    }))
+}
+
+async fn allow_client(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    body: std::result::Result<Json<AllowClient>, JsonRejection>,
+) -> ApiResult<Json<ClientList>> {
+    hosts::require_loopback(peer)?;
+    let Json(req) = body?;
+    let ip = req.ip.to_canonical();
+    let clients = blocking(&server, move |server| server.allow(ip)).await?;
+    Ok(Json(ClientList { clients }))
+}
+
+async fn deny_client(
+    State(server): State<Arc<Server>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    raw: std::result::Result<extract::Path<String>, PathRejection>,
+) -> ApiResult<Json<ClientList>> {
+    hosts::require_loopback(peer)?;
+    let extract::Path(raw) = raw?;
+    let ip = raw
+        .parse::<IpAddr>()
+        .map_err(|_| Error::invalid(format!("{raw:?} is not an IP address")))?
+        .to_canonical();
+    let clients = blocking(&server, move |server| server.deny(ip)).await?;
+    Ok(Json(ClientList { clients }))
 }

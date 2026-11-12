@@ -342,11 +342,19 @@ impl Storage {
     pub fn allow_client(&mut self, ip: IpAddr) -> Result<()> {
         self.conn
             .execute(
-                "INSERT INTO allowed_client (ip) VALUES (?1)",
+                "INSERT OR IGNORE INTO allowed_client (ip) VALUES (?1)",
                 [ip.to_string()],
             )
             .map_err(db)?;
         Ok(())
+    }
+
+    pub fn deny_client(&mut self, ip: IpAddr) -> Result<bool> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM allowed_client WHERE ip = ?1", [ip.to_string()])
+            .map_err(db)?;
+        Ok(removed > 0)
     }
 }
 

@@ -21,7 +21,7 @@ pub fn status_of(kind: ErrorKind) -> StatusCode {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         if self.0.kind == ErrorKind::Internal {
-            eprintln!("tack: internal error: {}", self.0.message);
+            eprintln!("tackd: internal error: {}", self.0.message);
         }
         (status_of(self.0.kind), Json(ErrorBody::from(&self.0))).into_response()
     }

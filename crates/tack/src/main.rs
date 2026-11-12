@@ -1,68 +1,296 @@
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use jiff::Timestamp;
+use jiff::civil::Date;
+use jiff::tz::TimeZone;
+use tack::{Client, DEFAULT_URL, item_path};
+use tack_core::Result;
+use tack_core::api::{CreateItem, Deleted, ItemList, ItemView, PatchItem, StatusList};
+use tack_core::model::Category;
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about = "Command line client for tackd")]
 struct Cli {
+    #[arg(long, env = "TACK_URL", default_value = DEFAULT_URL, global = true)]
+    url: String,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    Serve {
-        #[arg(long, default_value = "0.0.0.0:15470")]
-        addr: SocketAddr,
+    #[command(about = "List items matching a query; no query lists everything not archived")]
+    Ls { query: Vec<String> },
+    #[command(about = "Show one item with its body")]
+    Show {
+        #[arg(required = true)]
+        item: Vec<String>,
+    },
+    #[command(about = "Add an item; missing parents are created")]
+    Add {
+        #[arg(required = true)]
+        path: Vec<String>,
+        #[arg(short, long)]
+        body: Option<String>,
+        #[arg(short, long = "tag")]
+        tags: Vec<String>,
+        #[arg(short, long)]
+        due: Option<Date>,
+        #[arg(short, long)]
+        status: Option<String>,
+    },
+    #[command(about = "Mark an item done")]
+    Done {
+        #[arg(required = true)]
+        item: Vec<String>,
+        #[arg(short, long, help = "Also when items under it are still open")]
+        force: bool,
+    },
+    #[command(about = "Move or rename an item")]
+    Mv { item: String, path: String },
+    #[command(about = "Change an item")]
+    Set {
+        #[arg(required = true)]
+        item: Vec<String>,
+        #[arg(short, long)]
+        status: Option<String>,
+        #[arg(short, long)]
+        body: Option<String>,
+        #[arg(short, long = "tag", conflicts_with = "no_tags")]
+        tags: Vec<String>,
         #[arg(long)]
-        db: Option<PathBuf>,
+        no_tags: bool,
+        #[arg(short, long, conflicts_with = "no_due")]
+        due: Option<Date>,
         #[arg(long)]
-        log: Option<PathBuf>,
-        #[arg(long = "allow-host")]
-        allow_hosts: Vec<String>,
+        no_due: bool,
+        #[arg(long, conflicts_with = "unarchive")]
+        archive: bool,
+        #[arg(long)]
+        unarchive: bool,
+        #[arg(
+            short,
+            long,
+            help = "Mark done also when items under it are still open"
+        )]
+        force: bool,
+    },
+    #[command(about = "Delete an item")]
+    Rm {
+        #[arg(required = true)]
+        item: Vec<String>,
+        #[arg(short, long, help = "Also delete everything under it")]
+        recursive: bool,
     },
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
-        Command::Serve {
-            addr,
-            db,
-            log,
-            allow_hosts,
-        } => {
-            let config = tack_server::Config {
-                addr,
-                db: db.unwrap_or_else(|| xdg_dir("XDG_DATA_HOME", ".local/share").join("tack.db")),
-                request_log: log.unwrap_or_else(|| {
-                    xdg_dir("XDG_STATE_HOME", ".local/state").join("requests.log")
-                }),
-                allowed_hosts: allow_hosts,
-            };
-            let result = tokio::runtime::Runtime::new()
-                .map_err(|e| e.to_string())
-                .and_then(|rt| {
-                    rt.block_on(tack_server::serve(config))
-                        .map_err(|e| e.message)
-                });
-            match result {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(message) => {
-                    eprintln!("tack: {message}");
-                    ExitCode::FAILURE
-                }
-            }
+    let cli = Cli::parse();
+    match run(&Client::new(&cli.url), cli.command) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("tack: {}", e.message);
+            ExitCode::FAILURE
         }
     }
 }
 
-fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
-    std::env::var_os(var)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback)))
-        .unwrap_or_default()
-        .join("tack")
+fn run(client: &Client, command: Command) -> Result<()> {
+    let style = || Style::new(client);
+    match command {
+        Command::Ls { query } => {
+            let list: ItemList = client.get("/items", &[("q", &query.join(" "))])?;
+            print!("{}", style()?.lines(&list.items));
+        }
+        Command::Show { item } => {
+            let item: ItemView = client.get(&item_path(&item.join(" ")), &[])?;
+            print!("{}", style()?.detail(&item));
+        }
+        Command::Add {
+            path,
+            body,
+            tags,
+            due,
+            status,
+        } => {
+            let req = CreateItem {
+                path: path.join(" "),
+                body,
+                status,
+                tags,
+                due,
+            };
+            let item: ItemView = client.post("/items", &req)?;
+            print!("{}", style()?.lines(&[item]));
+        }
+        Command::Done { item, force } => {
+            let patch = PatchItem {
+                status: Some("done".into()),
+                force,
+                ..PatchItem::default()
+            };
+            let item: ItemView = client.patch(&item_path(&item.join(" ")), &patch)?;
+            print!("{}", style()?.lines(&[item]));
+        }
+        Command::Mv { item, path } => {
+            let patch = PatchItem {
+                path: Some(path),
+                ..PatchItem::default()
+            };
+            let item: ItemView = client.patch(&item_path(&item), &patch)?;
+            print!("{}", style()?.lines(&[item]));
+        }
+        Command::Set {
+            item,
+            status,
+            body,
+            tags,
+            no_tags,
+            due,
+            no_due,
+            archive,
+            unarchive,
+            force,
+        } => {
+            let patch = PatchItem {
+                path: None,
+                body,
+                status,
+                tags: (no_tags || !tags.is_empty()).then_some(tags),
+                archived: (archive || unarchive).then_some(archive),
+                due: if no_due { Some(None) } else { due.map(Some) },
+                force,
+            };
+            if patch
+                == (PatchItem {
+                    force,
+                    ..PatchItem::default()
+                })
+            {
+                return Err(tack_core::Error::invalid(
+                    "nothing to change, see tack set --help",
+                ));
+            }
+            let item: ItemView = client.patch(&item_path(&item.join(" ")), &patch)?;
+            print!("{}", style()?.lines(&[item]));
+        }
+        Command::Rm { item, recursive } => {
+            let recursive = if recursive { "true" } else { "false" };
+            let _: Deleted =
+                client.delete(&item_path(&item.join(" ")), &[("recursive", recursive)])?;
+        }
+    }
+    Ok(())
+}
+
+struct Style {
+    categories: Option<HashMap<String, Category>>,
+}
+
+impl Style {
+    fn new(client: &Client) -> Result<Style> {
+        let color = std::io::stdout().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+        let categories = if color {
+            let list: StatusList = client.get("/statuses", &[])?;
+            Some(
+                list.statuses
+                    .into_iter()
+                    .map(|s| (s.name, s.category))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        Ok(Style { categories })
+    }
+
+    fn status(&self, name: &str, width: usize) -> String {
+        let padded = format!("{name:<width$}");
+        let code = match self.categories.as_ref().and_then(|c| c.get(name)) {
+            Some(Category::Todo) => "34",
+            Some(Category::Active) => "33",
+            Some(Category::Done) => "32",
+            None => return padded,
+        };
+        format!("\x1b[{code}m{padded}\x1b[0m")
+    }
+
+    fn lines(&self, items: &[ItemView]) -> String {
+        let extras: Vec<String> = items.iter().map(extras).collect();
+        let status_width = items.iter().map(|i| i.status.len()).max().unwrap_or(0);
+        let path_width = items
+            .iter()
+            .zip(&extras)
+            .filter(|(_, e)| !e.is_empty())
+            .map(|(i, _)| i.path.len())
+            .max()
+            .unwrap_or(0);
+        let mut out = String::new();
+        for (item, extra) in items.iter().zip(extras) {
+            out.push_str(&self.status(&item.status, status_width));
+            out.push_str("  ");
+            if extra.is_empty() {
+                out.push_str(&item.path);
+            } else {
+                out.push_str(&format!("{:<path_width$}  {extra}", item.path));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn detail(&self, item: &ItemView) -> String {
+        let mut out = format!("{}\n", item.path);
+        let mut field = |name: &str, value: String| out.push_str(&format!("{name:<9}{value}\n"));
+        field("status", self.status(&item.status, 0));
+        if !item.tags.is_empty() {
+            field("tags", tags(item));
+        }
+        if let Some(due) = item.due {
+            field("due", due.to_string());
+        }
+        field("created", local(item.created_at));
+        field("updated", local(item.updated_at));
+        if let Some(at) = item.archived_at {
+            field("archived", local(at));
+        }
+        if !item.body.is_empty() {
+            out.push('\n');
+            out.push_str(item.body.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+}
+
+fn tags(item: &ItemView) -> String {
+    item.tags
+        .iter()
+        .map(|t| format!("+{t}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn extras(item: &ItemView) -> String {
+    let mut parts = Vec::new();
+    if !item.tags.is_empty() {
+        parts.push(tags(item));
+    }
+    if let Some(due) = item.due {
+        parts.push(due.to_string());
+    }
+    if item.archived_at.is_some() {
+        parts.push("archived".to_owned());
+    }
+    parts.join("  ")
+}
+
+fn local(at: Timestamp) -> String {
+    at.to_zoned(TimeZone::system())
+        .strftime("%Y-%m-%d %H:%M")
+        .to_string()
 }

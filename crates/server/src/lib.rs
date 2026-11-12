@@ -43,9 +43,11 @@ pub struct Server {
 
 impl Server {
     pub fn new(storage: Storage, hosts: AllowedHosts, log: RequestLog) -> Result<Server> {
+        let mut clients = storage.allowed_clients()?;
+        clients.sort();
         Ok(Server {
             tree: RwLock::new(storage.load()?),
-            clients: RwLock::new(storage.allowed_clients()?),
+            clients: RwLock::new(clients),
             storage: Mutex::new(storage),
             hosts,
             log,
@@ -75,7 +77,7 @@ impl Server {
         persist(&tree, &mut storage, changed).inspect_err(|_| match storage.load() {
             Ok(fresh) => *tree = fresh,
             Err(e) => {
-                eprintln!("tack: cannot reload after a failed write: {}", e.message);
+                eprintln!("tackd: cannot reload after a failed write: {}", e.message);
                 std::process::exit(1);
             }
         })
@@ -136,6 +138,31 @@ impl Server {
             },
         )
     }
+
+    fn clients(&self) -> Vec<IpAddr> {
+        self.clients.read().unwrap_or_else(|_| poisoned()).clone()
+    }
+
+    fn allow(&self, ip: IpAddr) -> Result<Vec<IpAddr>> {
+        let mut storage = self.storage();
+        storage.allow_client(ip)?;
+        let mut clients = self.clients.write().unwrap_or_else(|_| poisoned());
+        if !clients.contains(&ip) {
+            clients.push(ip);
+            clients.sort();
+        }
+        Ok(clients.clone())
+    }
+
+    fn deny(&self, ip: IpAddr) -> Result<Vec<IpAddr>> {
+        let mut storage = self.storage();
+        if !storage.deny_client(ip)? {
+            return Err(Error::not_found(format!("{ip} is not on the allowlist")));
+        }
+        let mut clients = self.clients.write().unwrap_or_else(|_| poisoned());
+        clients.retain(|c| *c != ip);
+        Ok(clients.clone())
+    }
 }
 
 async fn blocking<T: Send + 'static>(
@@ -149,7 +176,7 @@ async fn blocking<T: Send + 'static>(
 }
 
 fn poisoned() -> ! {
-    eprintln!("tack: a request panicked while holding a lock; exiting so the service restarts");
+    eprintln!("tackd: a request panicked while holding a lock; exiting so the service restarts");
     std::process::exit(1);
 }
 
@@ -181,9 +208,9 @@ pub async fn serve(config: Config) -> Result<()> {
         .await
         .map_err(|e| Error::internal(format!("cannot listen on {}: {e}", config.addr)))?;
 
-    let clients = server.clients.read().unwrap_or_else(|_| poisoned()).clone();
+    let clients = server.clients();
     let clients = if clients.is_empty() {
-        "none yet, the first client will be adopted".to_owned()
+        "everyone, no allowlist".to_owned()
     } else {
         clients
             .iter()
@@ -192,7 +219,7 @@ pub async fn serve(config: Config) -> Result<()> {
             .join(", ")
     };
     eprintln!(
-        "tack: listening on {}, {} items, database {}, request log {}, allowed clients: {clients}",
+        "tackd: listening on {}, {} items, database {}, request log {}, allowed clients: {clients}",
         config.addr,
         server.tree().len(),
         config.db.display(),

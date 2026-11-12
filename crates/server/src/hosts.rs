@@ -62,16 +62,21 @@ fn strip_port(host: &str) -> &str {
 }
 
 pub async fn guard(State(server): State<Arc<Server>>, req: Request, next: Next) -> Response {
-    let client = match client_ip(&req) {
-        Ok(client) => client,
-        Err(e) => return ApiError(e).into_response(),
-    };
-    if let Err(e) = allow_client(&server, client).await {
-        return ApiError(e).into_response();
-    }
-    match check_headers(&server, &req) {
+    let checked = client_ip(&req)
+        .and_then(|client| check_client(&server, client))
+        .and_then(|()| check_headers(&server, &req));
+    match checked {
         Ok(()) => next.run(req).await,
         Err(e) => ApiError(e).into_response(),
+    }
+}
+
+fn check_client(server: &Server, client: IpAddr) -> Result<()> {
+    let clients = server.clients.read().unwrap_or_else(|_| poisoned());
+    if client.is_loopback() || clients.is_empty() || clients.contains(&client) {
+        Ok(())
+    } else {
+        Err(Error::forbidden(format!("client {client} is not allowed")))
     }
 }
 
@@ -105,33 +110,14 @@ pub fn client_ip(req: &Request) -> Result<IpAddr> {
         .ok_or_else(|| Error::internal("connection has no peer address"))
 }
 
-async fn allow_client(server: &Arc<Server>, client: IpAddr) -> Result<()> {
-    {
-        let clients = server.clients.read().unwrap_or_else(|_| poisoned());
-        if clients.contains(&client) {
-            return Ok(());
-        }
-        if !clients.is_empty() {
-            return Err(Error::forbidden(format!("client {client} is not allowed")));
-        }
-    }
-    let server = server.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut storage = server.storage();
-        let mut clients = server.clients.write().unwrap_or_else(|_| poisoned());
-        if clients.contains(&client) {
-            return Ok(());
-        }
-        if !clients.is_empty() {
-            return Err(Error::forbidden(format!("client {client} is not allowed")));
-        }
-        storage.allow_client(client)?;
-        clients.push(client);
-        eprintln!("tack: adopted {client} as the first allowed client");
+pub fn require_loopback(peer: SocketAddr) -> Result<()> {
+    if peer.ip().to_canonical().is_loopback() {
         Ok(())
-    })
-    .await
-    .map_err(|e| Error::internal(format!("worker failed: {e}")))?
+    } else {
+        Err(Error::forbidden(
+            "the allowlist can only be changed on the server itself",
+        ))
+    }
 }
 
 #[cfg(test)]

@@ -45,7 +45,7 @@ impl RequestLog {
         line.push('\n');
         let mut file = self.file.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(e) = file.write_all(line.as_bytes()) {
-            eprintln!("tack: cannot write request log: {e}");
+            eprintln!("tackd: cannot write request log: {e}");
         }
     }
 }

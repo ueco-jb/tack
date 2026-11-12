@@ -198,14 +198,14 @@ fn file_database_reopens_without_reusing_ids_and_rejects_newer_schema() {
 }
 
 #[test]
-fn allowed_clients_round_trip_and_reject_duplicates() {
+fn allowed_clients_round_trip_and_deny() {
     let mut storage = Storage::open_in_memory().unwrap();
     assert!(storage.allowed_clients().unwrap().is_empty());
     let laptop: std::net::IpAddr = "192.168.1.20".parse().unwrap();
     storage.allow_client(laptop).unwrap();
+    storage.allow_client(laptop).unwrap();
     assert_eq!(storage.allowed_clients().unwrap(), [laptop]);
-    assert_eq!(
-        storage.allow_client(laptop).unwrap_err().kind,
-        ErrorKind::Conflict
-    );
+    assert!(storage.deny_client(laptop).unwrap());
+    assert!(!storage.deny_client(laptop).unwrap());
+    assert!(storage.allowed_clients().unwrap().is_empty());
 }

@@ -1,6 +1,6 @@
 [package]
 name = "tack"
-description = "Task list for the home network"
+description = "Command line client for tackd"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,8 +8,10 @@ repository.workspace = true
 
 [dependencies]
 clap.workspace = true
-tack_server.workspace = true
-tokio.workspace = true
+jiff.workspace = true
+serde.workspace = true
+tack_core.workspace = true
+ureq.workspace = true
 
 [lints]
 workspace = true

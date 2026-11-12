@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use jiff::Timestamp;
 use jiff::civil::Date;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -108,6 +110,16 @@ pub struct PatchStatus {
 pub struct Health {
     pub ok: bool,
     pub version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientList {
+    pub clients: Vec<IpAddr>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllowClient {
+    pub ip: IpAddr,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
