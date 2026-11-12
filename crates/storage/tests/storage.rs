@@ -3,7 +3,7 @@ use tack_core::ErrorKind;
 use tack_core::api::{CreateItem, CreateStatus, PatchItem};
 use tack_core::model::{Category, ItemId};
 use tack_core::path::Target;
-use tack_core::tree::Tree;
+use tack_core::tree::{Tree, Written};
 use tack_storage::Storage;
 
 fn at(second: i64) -> Timestamp {
@@ -21,25 +21,22 @@ fn id_of(tree: &Tree, path: &str) -> ItemId {
     tree.find(&path.parse::<Target>().unwrap()).unwrap().item.id
 }
 
+fn save(storage: &mut Storage, tree: &Tree, written: &Written) {
+    let items =
+        |ids: &[ItemId]| -> Vec<_> { ids.iter().map(|id| &tree.get(*id).unwrap().item).collect() };
+    storage
+        .save(&items(&written.created), &items(&written.updated))
+        .unwrap();
+}
+
 fn add(storage: &mut Storage, tree: &mut Tree, req: &CreateItem, now: Timestamp) {
-    let ids = tree.add(req, now).unwrap();
-    let items: Vec<_> = ids.iter().map(|id| &tree.get(*id).unwrap().item).collect();
-    storage.insert_items(&items).unwrap();
+    let written = tree.add(req, now).unwrap();
+    save(storage, tree, &written);
 }
 
 fn update(storage: &mut Storage, tree: &mut Tree, id: ItemId, patch: &PatchItem, now: Timestamp) {
-    let updated = tree.update(id, patch, now).unwrap();
-    let created: Vec<_> = updated
-        .created
-        .iter()
-        .map(|c| &tree.get(*c).unwrap().item)
-        .collect();
-    if !created.is_empty() {
-        storage.insert_items(&created).unwrap();
-    }
-    if updated.changed {
-        storage.update_item(&tree.get(id).unwrap().item).unwrap();
-    }
+    let written = tree.update(id, patch, now).unwrap();
+    save(storage, tree, &written);
 }
 
 #[test]
@@ -48,7 +45,7 @@ fn fresh_database_is_migrated_and_seeded() {
     assert_eq!(storage.schema_version().unwrap(), 1);
     let tree = storage.load().unwrap();
     let names: Vec<_> = tree.statuses().iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, ["todo", "progress", "done"]);
+    assert_eq!(names, ["todo", "doing", "done"]);
     assert!(tree.is_empty());
 }
 
@@ -83,7 +80,7 @@ fn live_tree_equals_a_fresh_load_after_every_kind_of_write() {
         renovations,
         &PatchItem {
             path: Some("work/archive/flat".into()),
-            status: Some("progress".into()),
+            status: Some("doing".into()),
             ..Default::default()
         },
         at(13),
@@ -110,6 +107,26 @@ fn live_tree_equals_a_fresh_load_after_every_kind_of_write() {
         .unwrap();
     storage.insert_status(tree.status(status).unwrap()).unwrap();
 
+    let work = id_of(&tree, "work");
+    update(
+        &mut storage,
+        &mut tree,
+        work,
+        &PatchItem {
+            archived: Some(true),
+            due: Some(Some(jiff::civil::date(2026, 12, 24))),
+            tags: Some(vec!["office".into(), "food".into()]),
+            ..Default::default()
+        },
+        at(15),
+    );
+    let colored = tree.set_tag_color("office", Some("teal")).unwrap();
+    storage.set_tag_color(&colored).unwrap();
+    let deleted = tree.remove_tag("shop").unwrap();
+    storage.delete_tag(&deleted).unwrap();
+    add(&mut storage, &mut tree, &create("work/new"), at(16));
+    assert_eq!(tree.get(work).unwrap().item.archived_at, None);
+
     let home = id_of(&tree, "home");
     let removed = tree.remove(home, true).unwrap();
     storage.delete_items(&removed).unwrap();
@@ -119,10 +136,11 @@ fn live_tree_equals_a_fresh_load_after_every_kind_of_write() {
     assert_eq!(
         paths,
         [
-            "work",
-            "work/archive",
-            "work/archive/flat",
-            "work/archive/flat/kitchen"
+            "/work",
+            "/work/archive",
+            "/work/archive/flat",
+            "/work/archive/flat/kitchen",
+            "/work/new"
         ]
     );
 }
@@ -135,9 +153,13 @@ fn a_stale_tree_is_a_conflict_and_writes_nothing() {
 
     add(&mut storage, &mut live, &create("home/x"), at(10));
 
-    let ids = stale.add(&create("home/y"), at(11)).unwrap();
-    let items: Vec<_> = ids.iter().map(|id| &stale.get(*id).unwrap().item).collect();
-    let err = storage.insert_items(&items).unwrap_err();
+    let written = stale.add(&create("home/y"), at(11)).unwrap();
+    let items: Vec<_> = written
+        .created
+        .iter()
+        .map(|id| &stale.get(*id).unwrap().item)
+        .collect();
+    let err = storage.save(&items, &[]).unwrap_err();
     assert_eq!(err.kind, ErrorKind::Conflict);
     assert_eq!(storage.load().unwrap(), live);
 }

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use tack_core::model::{Category, Item, ItemId, Status, StatusId};
+use tack_core::model::{Category, Item, ItemId, Status, StatusId, Tag, default_tag_color};
 use tack_core::tree::Tree;
 use tack_core::{Error, Result};
 
@@ -99,6 +99,21 @@ impl Storage {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, color FROM tag")
+            .map_err(db)?;
+        let all_tags = stmt
+            .query_map([], |row| {
+                Ok(Tag {
+                    name: row.get(0)?,
+                    color: row.get(1)?,
+                })
+            })
+            .map_err(db)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db)?;
+
         let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
         let mut stmt = self
             .conn
@@ -121,7 +136,7 @@ impl Storage {
             .conn
             .prepare(
                 "SELECT id, parent_id, title, body, status_id, \
-                 created_at, updated_at, started_at, done_at FROM item",
+                 created_at, updated_at, started_at, done_at, archived_at, due FROM item",
             )
             .map_err(db)?;
         let items = stmt
@@ -136,12 +151,25 @@ impl Storage {
                     row.get::<_, i64>(6)?,
                     row.get::<_, Option<i64>>(7)?,
                     row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             })
             .map_err(db)?
             .map(|row| {
-                let (id, parent, title, body, status, created, updated, started, done) =
-                    row.map_err(db)?;
+                let (
+                    id,
+                    parent,
+                    title,
+                    body,
+                    status,
+                    created,
+                    updated,
+                    started,
+                    done,
+                    archived,
+                    due,
+                ) = row.map_err(db)?;
                 Ok(Item {
                     id: ItemId(id),
                     parent: parent.map(ItemId),
@@ -153,6 +181,8 @@ impl Storage {
                     updated_at: from_secs(updated)?,
                     started_at: started.map(from_secs).transpose()?,
                     done_at: done.map(from_secs).transpose()?,
+                    archived_at: archived.map(from_secs).transpose()?,
+                    due: due.map(|d| parse_date(&d)).transpose()?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -167,16 +197,16 @@ impl Storage {
             .optional()
             .map_err(db)?;
 
-        Tree::new(statuses, items, last_id.unwrap_or(0) + 1)
+        Tree::new(statuses, items, all_tags, last_id.unwrap_or(0) + 1)
     }
 
-    pub fn insert_items(&mut self, items: &[&Item]) -> Result<()> {
+    pub fn save(&mut self, created: &[&Item], updated: &[&Item]) -> Result<()> {
         let tx = self.conn.transaction().map_err(db)?;
-        for item in items {
+        for item in created {
             tx.execute(
                 "INSERT INTO item (id, parent_id, title, body, status_id, \
-                 created_at, updated_at, started_at, done_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 created_at, updated_at, started_at, done_at, archived_at, due) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     item.id.0,
                     item.parent.map(|p| p.0),
@@ -187,42 +217,42 @@ impl Storage {
                     item.updated_at.as_second(),
                     item.started_at.map(|t| t.as_second()),
                     item.done_at.map(|t| t.as_second()),
+                    item.archived_at.map(|t| t.as_second()),
+                    item.due.map(|d| d.to_string()),
                 ],
             )
             .map_err(db)?;
             write_tags(&tx, item)?;
         }
-        tx.commit().map_err(db)
-    }
-
-    pub fn update_item(&mut self, item: &Item) -> Result<()> {
-        let tx = self.conn.transaction().map_err(db)?;
-        let updated = tx
-            .execute(
-                "UPDATE item SET parent_id = ?2, title = ?3, body = ?4, status_id = ?5, \
-                 updated_at = ?6, started_at = ?7, done_at = ?8 WHERE id = ?1",
-                params![
-                    item.id.0,
-                    item.parent.map(|p| p.0),
-                    item.title,
-                    item.body,
-                    item.status.0,
-                    item.updated_at.as_second(),
-                    item.started_at.map(|t| t.as_second()),
-                    item.done_at.map(|t| t.as_second()),
-                ],
-            )
-            .map_err(db)?;
-        if updated != 1 {
-            return Err(Error::internal(format!(
-                "item {} is not in the database",
-                item.id
-            )));
+        for item in updated {
+            let count = tx
+                .execute(
+                    "UPDATE item SET parent_id = ?2, title = ?3, body = ?4, status_id = ?5, \
+                     updated_at = ?6, started_at = ?7, done_at = ?8, archived_at = ?9, due = ?10 WHERE id = ?1",
+                    params![
+                        item.id.0,
+                        item.parent.map(|p| p.0),
+                        item.title,
+                        item.body,
+                        item.status.0,
+                        item.updated_at.as_second(),
+                        item.started_at.map(|t| t.as_second()),
+                        item.done_at.map(|t| t.as_second()),
+                        item.archived_at.map(|t| t.as_second()),
+                        item.due.map(|d| d.to_string()),
+                    ],
+                )
+                .map_err(db)?;
+            if count != 1 {
+                return Err(Error::internal(format!(
+                    "item {} is not in the database",
+                    item.id
+                )));
+            }
+            tx.execute("DELETE FROM item_tag WHERE item_id = ?1", [item.id.0])
+                .map_err(db)?;
+            write_tags(&tx, item)?;
         }
-        tx.execute("DELETE FROM item_tag WHERE item_id = ?1", [item.id.0])
-            .map_err(db)?;
-        write_tags(&tx, item)?;
-        delete_unused_tags(&tx)?;
         tx.commit().map_err(db)
     }
 
@@ -234,7 +264,6 @@ impl Storage {
                 stmt.execute([id.0]).map_err(db)?;
             }
         }
-        delete_unused_tags(&tx)?;
         tx.commit().map_err(db)
     }
 
@@ -276,6 +305,24 @@ impl Storage {
             .map_err(db)?;
         Ok(())
     }
+
+    pub fn set_tag_color(&mut self, tag: &Tag) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE tag SET color = ?2 WHERE name = ?1",
+                params![tag.name, tag.color],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+
+    pub fn delete_tag(&mut self, name: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM tag WHERE name = ?1", [name])
+            .map_err(db)?;
+        Ok(())
+    }
+
     pub fn allowed_clients(&self) -> Result<Vec<IpAddr>> {
         let mut stmt = self
             .conn
@@ -305,8 +352,11 @@ impl Storage {
 
 fn write_tags(tx: &Transaction<'_>, item: &Item) -> Result<()> {
     for tag in &item.tags {
-        tx.execute("INSERT OR IGNORE INTO tag (name) VALUES (?1)", [tag])
-            .map_err(db)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO tag (name, color) VALUES (?1, ?2)",
+            params![tag, default_tag_color(tag)],
+        )
+        .map_err(db)?;
         tx.execute(
             "INSERT INTO item_tag (item_id, tag_id) SELECT ?1, id FROM tag WHERE name = ?2",
             params![item.id.0, tag],
@@ -316,13 +366,9 @@ fn write_tags(tx: &Transaction<'_>, item: &Item) -> Result<()> {
     Ok(())
 }
 
-fn delete_unused_tags(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute(
-        "DELETE FROM tag WHERE id NOT IN (SELECT tag_id FROM item_tag)",
-        [],
-    )
-    .map_err(db)?;
-    Ok(())
+fn parse_date(raw: &str) -> Result<jiff::civil::Date> {
+    raw.parse()
+        .map_err(|e| Error::internal(format!("stored due date {raw:?} is invalid: {e}")))
 }
 
 fn from_secs(secs: i64) -> Result<Timestamp> {
