@@ -2,6 +2,7 @@ mod error;
 mod hosts;
 mod log;
 mod routes;
+mod web;
 
 #[cfg(test)]
 mod tests;

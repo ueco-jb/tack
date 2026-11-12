@@ -165,20 +165,21 @@ async fn items_by_id_or_path_with_error_codes() {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(item["path"], "home/weekly/buy_groceries");
+    assert_eq!(item["path"], "/home/weekly/buy_groceries");
     let id = item["id"].as_i64().unwrap();
 
-    let (status, body) = h
+    let (status, again) = h
         .send(
             Method::POST,
             "/items",
             Some(json!({"path": "home/weekly/buy groceries"})),
         )
         .await;
-    assert_eq!((status, kind(&body)), (StatusCode::CONFLICT, "conflict"));
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(again["path"], "/home/weekly/buy_groceries-2");
 
     let (_, list) = h.send(Method::GET, "/items?q=groc", None).await;
-    assert_eq!(list["items"].as_array().unwrap().len(), 1);
+    assert_eq!(list["items"].as_array().unwrap().len(), 2);
 
     let (status, by_id) = h.send(Method::GET, &format!("/items/{id}"), None).await;
     assert_eq!(status, StatusCode::OK);
@@ -195,7 +196,7 @@ async fn items_by_id_or_path_with_error_codes() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(moved["path"], "home/shopping");
+    assert_eq!(moved["path"], "/home/shopping");
 
     h.send(
         Method::POST,
@@ -218,7 +219,7 @@ async fn items_by_id_or_path_with_error_codes() {
         .send(Method::DELETE, "/items/home?recursive=true", None)
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(deleted["deleted"].as_array().unwrap().len(), 4);
+    assert_eq!(deleted["deleted"].as_array().unwrap().len(), 5);
 
     let (status, body) = h.send(Method::GET, &format!("/items/{id}"), None).await;
     assert_eq!((status, kind(&body)), (StatusCode::NOT_FOUND, "not_found"));
@@ -233,6 +234,65 @@ async fn items_by_id_or_path_with_error_codes() {
 
     let (status, body) = h.send(Method::GET, "/nothing", None).await;
     assert_eq!((status, kind(&body)), (StatusCode::NOT_FOUND, "not_found"));
+}
+
+#[tokio::test]
+async fn archive_hides_and_tags_keep_colors() {
+    let h = Harness::new();
+    h.send(
+        Method::POST,
+        "/items",
+        Some(json!({"path": "home/weekly/clean", "tags": ["chores"]})),
+    )
+    .await;
+    let (status, archived) = h
+        .send(
+            Method::PATCH,
+            "/items/home/weekly",
+            Some(json!({"archived": true})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(archived["archived_at"].is_string());
+    let paths = |list: &Value| -> Vec<String> {
+        list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["path"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (_, listed) = h.send(Method::GET, "/items", None).await;
+    assert_eq!(paths(&listed), ["/home"]);
+    let (_, archive) = h.send(Method::GET, "/items?q=is:archived", None).await;
+    assert_eq!(paths(&archive), ["/home/weekly", "/home/weekly/clean"]);
+
+    let (status, tag) = h
+        .send(
+            Method::PATCH,
+            "/tags/chores",
+            Some(json!({"color": "green"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tag, json!({"name": "chores", "color": "green"}));
+    let (_, tags) = h.send(Method::GET, "/tags", None).await;
+    assert_eq!(
+        tags,
+        json!({"tags": [{"name": "chores", "color": "green"}]})
+    );
+    let (status, body) = h
+        .send(Method::PATCH, "/tags/nope", Some(json!({"color": "red"})))
+        .await;
+    assert_eq!((status, kind(&body)), (StatusCode::NOT_FOUND, "not_found"));
+
+    let (status, _) = h.send(Method::DELETE, "/tags/chores", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, clean) = h.send(Method::GET, "/items/home/weekly/clean", None).await;
+    assert_eq!(clean["tags"], json!([]));
+
+    let loaded = h.server.storage().load().unwrap();
+    assert_eq!(*h.server.tree(), loaded);
 }
 
 #[tokio::test]
@@ -276,9 +336,9 @@ async fn statuses_add_update_remove() {
 async fn tree_matches_storage_after_api_writes() {
     let h = Harness::new();
     for path in [
-        "home/weekly/buy groceries",
-        "home/weekly/clean",
-        "work/report",
+        "/home/weekly/buy groceries",
+        "/home/weekly/clean",
+        "/work/report",
     ] {
         h.send(Method::POST, "/items", Some(json!({"path": path})))
             .await;
@@ -286,7 +346,7 @@ async fn tree_matches_storage_after_api_writes() {
     h.send(
         Method::PATCH,
         "/items/home/weekly/clean",
-        Some(json!({"status": "progress", "tags": ["chores"], "path": "archive/2026/clean"})),
+        Some(json!({"status": "doing", "tags": ["chores"], "path": "archive/2026/clean"})),
     )
     .await;
     h.send(Method::DELETE, "/items/work/report", None).await;
@@ -317,5 +377,5 @@ async fn every_request_except_get_is_logged_with_body_and_error() {
     assert_eq!(lines[0]["error"], Value::Null);
     assert_eq!(lines[1]["path"], format!("{API_PREFIX}/items/nowhere"));
     assert_eq!(lines[1]["status"], 404);
-    assert_eq!(lines[1]["error"], "no open item at nowhere");
+    assert_eq!(lines[1]["error"], "no item at /nowhere");
 }

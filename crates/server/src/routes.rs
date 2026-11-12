@@ -10,15 +10,17 @@ use jiff::Timestamp;
 use serde::Deserialize;
 use tack_core::api::{
     API_PREFIX, CreateItem, CreateStatus, Deleted, Health, ItemList, ItemView, PatchItem,
-    PatchStatus, StatusList,
+    PatchStatus, PatchTag, StatusList, TagList,
 };
-use tack_core::model::{Item, Status, whole_seconds};
+use tack_core::model::{Item, ItemId, Status, Tag, whole_seconds};
 use tack_core::path::Target;
 use tack_core::query::Query;
+use tack_core::tree::{Tree, Written};
 use tack_core::{Error, Result};
+use tack_storage::Storage;
 
 use crate::error::ApiError;
-use crate::{Server, hosts, log};
+use crate::{Server, hosts, log, web};
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
@@ -31,8 +33,11 @@ pub fn router(server: Arc<Server>) -> Router {
         .route(
             "/statuses/{name}",
             patch(update_status).delete(remove_status),
-        );
+        )
+        .route("/tags", get(tags))
+        .route("/tags/{name}", patch(update_tag).delete(remove_tag));
     Router::new()
+        .route("/", get(web::index))
         .nest(API_PREFIX, api)
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(server.clone(), hosts::guard))
@@ -108,13 +113,10 @@ async fn create(
     let view = blocking(&server, move |server| {
         server.write(
             |tree| tree.add(&req, now()),
-            |tree, storage, ids| {
-                let items: Vec<&Item> = ids
-                    .iter()
-                    .filter_map(|id| tree.get(*id).map(|n| &n.item))
-                    .collect();
-                storage.insert_items(&items)?;
-                let last = ids
+            |tree, storage, written| {
+                save(tree, storage, &written)?;
+                let last = written
+                    .created
                     .last()
                     .ok_or_else(|| Error::internal("add created nothing"))?;
                 tree.view(*last)
@@ -123,6 +125,18 @@ async fn create(
     })
     .await?;
     Ok((StatusCode::CREATED, Json(view)))
+}
+
+fn save(tree: &Tree, storage: &mut Storage, written: &Written) -> Result<()> {
+    if written.created.is_empty() && written.updated.is_empty() {
+        return Ok(());
+    }
+    let items = |ids: &[ItemId]| -> Vec<&Item> {
+        ids.iter()
+            .filter_map(|id| tree.get(*id).map(|n| &n.item))
+            .collect()
+    };
+    storage.save(&items(&written.created), &items(&written.updated))
 }
 
 async fn update(
@@ -136,21 +150,11 @@ async fn update(
         server.write(
             |tree| {
                 let id = tree.find(&target)?.item.id;
-                let updated = tree.update(id, &patch, now())?;
-                Ok((id, updated))
+                let written = tree.update(id, &patch, now())?;
+                Ok((id, written))
             },
-            |tree, storage, (id, updated)| {
-                let created: Vec<&Item> = updated
-                    .created
-                    .iter()
-                    .filter_map(|c| tree.get(*c).map(|n| &n.item))
-                    .collect();
-                if !created.is_empty() {
-                    storage.insert_items(&created)?;
-                }
-                if updated.changed {
-                    storage.update_item(&tree.node(id)?.item)?;
-                }
+            |tree, storage, (id, written)| {
+                save(tree, storage, &written)?;
                 tree.view(id)
             },
         )
@@ -243,6 +247,47 @@ async fn remove_status(
         server.write(
             |tree| tree.remove_status(&name),
             |_, storage, id| storage.delete_status(id),
+        )
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn tags(State(server): State<Arc<Server>>) -> Json<TagList> {
+    Json(TagList {
+        tags: server.tree().tags(),
+    })
+}
+
+async fn update_tag(
+    State(server): State<Arc<Server>>,
+    name: std::result::Result<extract::Path<String>, PathRejection>,
+    body: std::result::Result<Json<PatchTag>, JsonRejection>,
+) -> ApiResult<Json<Tag>> {
+    let extract::Path(name) = name?;
+    let Json(patch) = body?;
+    let tag = blocking(&server, move |server| {
+        server.write(
+            |tree| tree.set_tag_color(&name, patch.color.as_deref()),
+            |_, storage, tag| {
+                storage.set_tag_color(&tag)?;
+                Ok(tag)
+            },
+        )
+    })
+    .await?;
+    Ok(Json(tag))
+}
+
+async fn remove_tag(
+    State(server): State<Arc<Server>>,
+    name: std::result::Result<extract::Path<String>, PathRejection>,
+) -> ApiResult<StatusCode> {
+    let extract::Path(name) = name?;
+    blocking(&server, move |server| {
+        server.write(
+            |tree| tree.remove_tag(&name),
+            |_, storage, name| storage.delete_tag(&name),
         )
     })
     .await?;
