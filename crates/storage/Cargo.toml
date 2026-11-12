@@ -1,0 +1,19 @@
+[package]
+name = "tack_storage"
+description = "Migrations, loading the tree, saving changes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+jiff.workspace = true
+rusqlite.workspace = true
+tack_core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+rusqlite.workspace = true
+
+[lints]
+workspace = true
