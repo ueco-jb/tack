@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/server", "crates/storage"]
+members = ["crates/core", "crates/server", "crates/storage", "crates/tack"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ repository = "https://github.com/ueco-jb/tack"
 
 [workspace.dependencies]
 axum = "0.8"
+clap = { version = "4", features = ["derive"] }
 http-body-util = "0.1"
 rusqlite = { version = "0.42", features = ["bundled"] }
 serde_json = { version = "1", features = ["preserve_order"] }
