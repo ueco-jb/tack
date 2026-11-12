@@ -1,4 +1,4 @@
-use crate::model::{ItemId, normalize_tag};
+use crate::model::{ItemId, StatusId, normalize_tag};
 use crate::path::normalize_word;
 use crate::tree::Tree;
 use crate::{Error, Result};
@@ -6,8 +6,10 @@ use crate::{Error, Result};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Is {
     #[default]
+    Listed,
     Open,
     Done,
+    Archived,
     All,
 }
 
@@ -62,9 +64,10 @@ fn parse_is(value: &str) -> Result<Is> {
     match value.to_lowercase().as_str() {
         "open" => Ok(Is::Open),
         "done" => Ok(Is::Done),
+        "archived" => Ok(Is::Archived),
         "all" => Ok(Is::All),
         other => Err(Error::invalid(format!(
-            "unknown is:{other}; expected is:open, is:done or is:all"
+            "unknown is:{other}; expected is:open, is:done, is:archived or is:all"
         ))),
     }
 }
@@ -102,17 +105,22 @@ impl Tree {
             .as_deref()
             .map(|s| self.status_by_name(s).map(|s| s.id))
             .transpose()?;
+        let (words, typed_statuses) = self.split_status_words(&query.words);
         Ok(self
             .iter()
             .filter(|node| {
+                let done = node.item.done_at.is_some();
                 let is = match query.is {
-                    Is::Open => node.open,
-                    Is::Done => !node.open,
+                    Is::Listed => !node.archived,
+                    Is::Open => !node.archived && !done,
+                    Is::Done => !node.archived && done,
+                    Is::Archived => node.archived,
                     Is::All => true,
                 };
-                is && query.words.iter().all(|w| node.path.contains(w.as_str()))
-                    && !query.without.iter().any(|w| node.path.contains(w.as_str()))
+                is && words.iter().all(|w| matches_word(&node.path, w))
+                    && !query.without.iter().any(|w| matches_word(&node.path, w))
                     && status.is_none_or(|s| node.item.status == s)
+                    && (typed_statuses.is_empty() || typed_statuses.contains(&node.item.status))
                     && query
                         .tags
                         .iter()
@@ -120,6 +128,43 @@ impl Tree {
             })
             .map(|node| node.item.id)
             .collect())
+    }
+
+    fn split_status_words<'q>(&self, words: &'q [String]) -> (Vec<&'q str>, Vec<StatusId>) {
+        let phrases: Vec<(Vec<String>, StatusId)> = self
+            .statuses()
+            .iter()
+            .flat_map(|s| {
+                [s.name.clone(), normalize_word(&s.label)]
+                    .map(|p| (p.split('_').map(str::to_owned).collect(), s.id))
+            })
+            .collect();
+        let mut rest = Vec::new();
+        let mut found = Vec::new();
+        let mut i = 0;
+        'words: while i < words.len() {
+            for (parts, id) in &phrases {
+                let joined = parts.join("_");
+                let spread = words.len() - i >= parts.len()
+                    && parts.iter().zip(&words[i..]).all(|(p, w)| p == w);
+                if words[i] == joined || spread {
+                    found.push(*id);
+                    i += if words[i] == joined { 1 } else { parts.len() };
+                    continue 'words;
+                }
+            }
+            rest.push(words[i].as_str());
+            i += 1;
+        }
+        (rest, found)
+    }
+}
+
+fn matches_word(path: &str, word: &str) -> bool {
+    if word.starts_with('/') {
+        path.starts_with(word)
+    } else {
+        path.contains(word)
     }
 }
 
@@ -129,12 +174,11 @@ mod tests {
 
     #[test]
     fn parses_words_operators_and_negation() {
-        let q =
-            Query::parse(r#"weekly -work +food status:Progress is:all "buy  groceries""#).unwrap();
+        let q = Query::parse(r#"weekly -work +food status:Doing is:all "buy  groceries""#).unwrap();
         assert_eq!(q.words, ["weekly", "buy_groceries"]);
         assert_eq!(q.without, ["work"]);
         assert_eq!(q.tags, ["food"]);
-        assert_eq!(q.status.as_deref(), Some("progress"));
+        assert_eq!(q.status.as_deref(), Some("doing"));
         assert_eq!(q.is, Is::All);
     }
 

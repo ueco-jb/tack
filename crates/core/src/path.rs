@@ -82,10 +82,8 @@ impl ItemPath {
 
 impl fmt::Display for ItemPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, segment) in self.0.iter().enumerate() {
-            if i > 0 {
-                f.write_str("/")?;
-            }
+        for segment in &self.0 {
+            f.write_str("/")?;
             f.write_str(&name_of(segment))?;
         }
         Ok(())
@@ -117,13 +115,7 @@ impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Target::Id(id) => id.fmt(f),
-            Target::Path(path) => {
-                let text = path.to_string();
-                if text.bytes().all(|b| b.is_ascii_digit()) {
-                    f.write_str("/")?;
-                }
-                f.write_str(&text)
-            }
+            Target::Path(path) => path.fmt(f),
         }
     }
 }
@@ -206,7 +198,7 @@ mod tests {
         let a = ItemPath::parse("/Home/weekly/buy groceries/").unwrap();
         let b = ItemPath::parse("home/weekly/buy_groceries").unwrap();
         assert_eq!(a, b);
-        assert_eq!(a.to_string(), "home/weekly/buy_groceries");
+        assert_eq!(a.to_string(), "/home/weekly/buy_groceries");
         assert_eq!(a.segments()[2], "buy groceries");
     }
 
@@ -220,7 +212,7 @@ mod tests {
     fn bare_number_is_id_slash_number_is_path() {
         assert_eq!("12".parse::<Target>().unwrap(), Target::Id(ItemId(12)));
         let path: Target = "/2026".parse().unwrap();
-        assert!(matches!(&path, Target::Path(p) if p.to_string() == "2026"));
+        assert!(matches!(&path, Target::Path(p) if p.to_string() == "/2026"));
         assert_eq!(path.to_string(), "/2026");
     }
 
@@ -231,6 +223,6 @@ mod tests {
         let string_id: Target = serde_json::from_str("\"7\"").unwrap();
         assert_eq!(id, Target::Id(ItemId(7)));
         assert_eq!(string_id, Target::Id(ItemId(7)));
-        assert_eq!(serde_json::to_string(&path).unwrap(), "\"home/weekly\"");
+        assert_eq!(serde_json::to_string(&path).unwrap(), "\"/home/weekly\"");
     }
 }

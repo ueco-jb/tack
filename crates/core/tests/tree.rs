@@ -1,10 +1,10 @@
 use jiff::Timestamp;
 use tack_core::ErrorKind;
 use tack_core::api::{CreateItem, CreateStatus, PatchItem, PatchStatus};
-use tack_core::model::{Category, ItemId, Status, StatusId};
+use tack_core::model::{Category, ItemId, Status, StatusId, TAG_COLORS};
 use tack_core::path::Target;
 use tack_core::query::Query;
-use tack_core::tree::{Tree, Updated};
+use tack_core::tree::{Tree, Written};
 
 fn seed_statuses() -> Vec<Status> {
     let status = |id, name: &str, category, position| Status {
@@ -16,7 +16,7 @@ fn seed_statuses() -> Vec<Status> {
     };
     vec![
         status(1, "todo", Category::Todo, 1),
-        status(2, "progress", Category::Active, 2),
+        status(2, "doing", Category::Active, 2),
         status(3, "done", Category::Done, 3),
     ]
 }
@@ -29,7 +29,7 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         Self {
-            tree: Tree::new(seed_statuses(), vec![], 1).unwrap(),
+            tree: Tree::new(seed_statuses(), vec![], vec![], 1).unwrap(),
             clock: 1_000,
         }
     }
@@ -48,20 +48,20 @@ impl Harness {
             },
             now,
         )?;
-        Ok(*created.last().unwrap())
+        Ok(*created.created.last().unwrap())
     }
 
     fn add(&mut self, title: &str) -> ItemId {
         self.try_add(title).unwrap()
     }
 
-    fn try_patch(&mut self, target: &str, patch: PatchItem) -> tack_core::Result<Updated> {
+    fn try_patch(&mut self, target: &str, patch: PatchItem) -> tack_core::Result<Written> {
         let id = self.id(target);
         let now = self.now();
         self.tree.update(id, &patch, now)
     }
 
-    fn set_status(&mut self, target: &str, status: &str) -> tack_core::Result<Updated> {
+    fn set_status(&mut self, target: &str, status: &str) -> tack_core::Result<Written> {
         self.try_patch(
             target,
             PatchItem {
@@ -69,6 +69,20 @@ impl Harness {
                 ..Default::default()
             },
         )
+    }
+
+    fn archive(&mut self, target: &str, archived: bool) -> tack_core::Result<Written> {
+        self.try_patch(
+            target,
+            PatchItem {
+                archived: Some(archived),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn path_of(&self, id: ItemId) -> String {
+        self.tree.get(id).unwrap().path.to_string()
     }
 
     fn id(&self, target: &str) -> ItemId {
@@ -92,6 +106,7 @@ impl Harness {
         let rebuilt = Tree::new(
             self.tree.statuses().to_vec(),
             self.tree.items().cloned().collect(),
+            self.tree.tags(),
             self.tree.next_item_id(),
         )
         .unwrap();
@@ -107,15 +122,15 @@ fn adding_a_path_creates_missing_ancestors_once() {
     assert_eq!(
         h.paths(""),
         [
-            "home",
-            "home/weekly",
-            "home/weekly/buy_groceries",
-            "home/weekly/renovations",
-            "home/weekly/renovations/kitchen",
+            "/home",
+            "/home/weekly",
+            "/home/weekly/buy_groceries",
+            "/home/weekly/renovations",
+            "/home/weekly/renovations/kitchen",
         ]
     );
-    let err = h.try_add("home/weekly/buy_groceries").unwrap_err();
-    assert_eq!(err.kind, ErrorKind::Conflict);
+    let again = h.add("home/weekly/buy_groceries");
+    assert_eq!(h.path_of(again), "/home/weekly/buy_groceries-2");
 }
 
 #[test]
@@ -123,36 +138,107 @@ fn a_rejected_add_changes_nothing() {
     let mut h = Harness::new();
     h.add("home/weekly/buy groceries");
     let before = h.tree.clone();
-    assert!(h.try_add("home/weekly/buy groceries").is_err());
+    let now = h.now();
+    let err = h
+        .tree
+        .add(
+            &CreateItem {
+                path: "home/garden/beds".into(),
+                status: Some("nope".into()),
+                ..Default::default()
+            },
+            now,
+        )
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Invalid);
     assert_eq!(h.tree, before);
 }
 
 #[test]
-fn a_done_item_frees_its_name_for_the_next_one() {
+fn adding_or_moving_under_an_archived_item_unarchives_its_chain() {
     let mut h = Harness::new();
-    h.add("home/weekly/buy groceries");
-    h.set_status("home/weekly/buy groceries", "done").unwrap();
-    let second = h.add("home/weekly/buy groceries");
-    assert_eq!(h.id("home/weekly/buy_groceries"), second);
-    assert_eq!(h.paths("is:all groceries").len(), 2);
+    h.add("home/weekly/clean");
+    h.add("work/report");
+    h.archive("home", true).unwrap();
+    h.archive("home/weekly", true).unwrap();
+
+    let now = h.now();
+    let written = h
+        .tree
+        .add(
+            &CreateItem {
+                path: "home/weekly/laundry".into(),
+                ..Default::default()
+            },
+            now,
+        )
+        .unwrap();
+    let mut unarchived = written.updated.clone();
+    unarchived.sort();
+    let mut expected = vec![h.id("home"), h.id("home/weekly")];
+    expected.sort();
+    assert_eq!(unarchived, expected);
+    assert!(h.paths("is:archived").is_empty());
+    assert_eq!(h.paths("").len(), 6);
+
+    h.archive("home", true).unwrap();
+    let moved = h
+        .try_patch(
+            "work/report",
+            PatchItem {
+                path: Some("home/weekly/report".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(moved.updated, [h.id("home"), h.id("home/weekly/report")]);
+    assert!(h.paths("is:archived").is_empty());
+    h.assert_matches_rebuild();
 }
 
 #[test]
-fn adding_below_a_done_item_starts_a_fresh_one() {
+fn repeated_names_get_the_next_free_number_whatever_their_state() {
+    let mut h = Harness::new();
+    h.add("home/weekly/cleaning");
+    h.set_status("home/weekly/cleaning", "done").unwrap();
+    let second = h.add("home/weekly/cleaning");
+    h.archive("home/weekly/cleaning", true).unwrap();
+    let third = h.add("home/weekly/cleaning");
+    assert_eq!(h.path_of(second), "/home/weekly/cleaning-2");
+    assert_eq!(h.path_of(third), "/home/weekly/cleaning-3");
+    assert_eq!(
+        h.paths(""),
+        [
+            "/home",
+            "/home/weekly",
+            "/home/weekly/cleaning-2",
+            "/home/weekly/cleaning-3"
+        ]
+    );
+    assert_eq!(h.paths("is:archived"), ["/home/weekly/cleaning"]);
+
+    h.tree.remove(second, false).unwrap();
+    let fourth = h.add("home/weekly/cleaning");
+    assert_eq!(h.path_of(fourth), "/home/weekly/cleaning-2");
+}
+
+#[test]
+fn done_items_stay_listed_and_take_new_children() {
     let mut h = Harness::new();
     h.add("home/weekly/buy groceries");
-    h.try_patch(
-        "home/weekly",
-        PatchItem {
-            status: Some("done".into()),
-            force: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    h.add("home/weekly/clean");
-    assert_eq!(h.paths(""), ["home", "home/weekly", "home/weekly/clean"]);
-    assert_eq!(h.paths("is:all weekly").len(), 4);
+    h.set_status("home/weekly/buy groceries", "done").unwrap();
+    h.add("home/weekly/buy groceries/milk");
+    assert_eq!(
+        h.paths(""),
+        [
+            "/home",
+            "/home/weekly",
+            "/home/weekly/buy_groceries",
+            "/home/weekly/buy_groceries/milk"
+        ]
+    );
+    assert_eq!(h.paths("is:done"), ["/home/weekly/buy_groceries"]);
+    assert_eq!(h.paths("is:open groc"), ["/home/weekly/buy_groceries/milk"]);
 }
 
 #[test]
@@ -164,11 +250,11 @@ fn display_order_keeps_children_under_their_parent() {
     assert_eq!(
         h.paths(""),
         [
-            "home",
-            "home/weekly",
-            "home/weekly/a",
-            "home/weekly-x",
-            "home/weekly.old",
+            "/home",
+            "/home/weekly",
+            "/home/weekly/a",
+            "/home/weekly-x",
+            "/home/weekly.old",
         ]
     );
 }
@@ -179,7 +265,7 @@ fn rename_and_move_rewrite_every_descendant_path() {
     h.add("home/weekly/renovations/kitchen");
     h.add("work");
     h.try_patch(
-        "home/weekly/renovations",
+        "/home/weekly/renovations",
         PatchItem {
             path: Some("work/Flat".into()),
             ..Default::default()
@@ -189,11 +275,11 @@ fn rename_and_move_rewrite_every_descendant_path() {
     assert_eq!(
         h.paths(""),
         [
-            "home",
-            "home/weekly",
-            "work",
-            "work/flat",
-            "work/flat/kitchen"
+            "/home",
+            "/home/weekly",
+            "/work",
+            "/work/flat",
+            "/work/flat/kitchen"
         ]
     );
     h.assert_matches_rebuild();
@@ -205,30 +291,30 @@ fn moving_creates_missing_parents_but_not_inside_itself() {
     h.add("home/weekly/renovations/kitchen");
     let updated = h
         .try_patch(
-            "home/weekly/renovations",
+            "/home/weekly/renovations",
             PatchItem {
                 path: Some("archive/2026/flat".into()),
                 ..Default::default()
             },
         )
         .unwrap();
-    assert!(updated.changed);
+    assert!(!updated.updated.is_empty());
     assert_eq!(updated.created.len(), 2);
     assert_eq!(
         h.paths(""),
         [
-            "archive",
-            "archive/2026",
-            "archive/2026/flat",
-            "archive/2026/flat/kitchen",
-            "home",
-            "home/weekly",
+            "/archive",
+            "/archive/2026",
+            "/archive/2026/flat",
+            "/archive/2026/flat/kitchen",
+            "/home",
+            "/home/weekly",
         ]
     );
 
     let before = h.tree.clone();
     let into_self = h.try_patch(
-        "archive",
+        "/archive",
         PatchItem {
             path: Some("archive/2026/new/archive".into()),
             ..Default::default()
@@ -240,37 +326,41 @@ fn moving_creates_missing_parents_but_not_inside_itself() {
 }
 
 #[test]
-fn moves_into_own_subtree_or_onto_an_open_name_conflict() {
+fn moving_into_own_subtree_conflicts_and_taken_names_get_numbered() {
     let mut h = Harness::new();
     h.add("home/weekly/renovations");
     h.add("work/weekly");
     let into_self = h.try_patch(
-        "home",
+        "/home",
         PatchItem {
             path: Some("home/weekly/renovations/home".into()),
             ..Default::default()
         },
     );
     assert_eq!(into_self.unwrap_err().kind, ErrorKind::Conflict);
-    let onto_name = h.try_patch(
-        "work/weekly",
-        PatchItem {
-            path: Some("home/weekly".into()),
-            ..Default::default()
-        },
-    );
-    assert_eq!(onto_name.unwrap_err().kind, ErrorKind::Conflict);
+    let onto_name = h
+        .try_patch(
+            "/work/weekly",
+            PatchItem {
+                path: Some("home/weekly".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!onto_name.updated.is_empty());
+    assert!(h.paths("").contains(&"/home/weekly-2".to_string()));
+    h.assert_matches_rebuild();
 }
 
 #[test]
-fn done_with_open_children_needs_force_and_hides_the_subtree() {
+fn done_with_open_children_needs_force_and_archive_hides_the_subtree() {
     let mut h = Harness::new();
     h.add("home/weekly/renovations/kitchen");
     let err = h.set_status("home/weekly/renovations", "done").unwrap_err();
     assert_eq!(err.kind, ErrorKind::Conflict);
 
     h.try_patch(
-        "home/weekly/renovations",
+        "/home/weekly/renovations",
         PatchItem {
             status: Some("done".into()),
             force: true,
@@ -278,40 +368,165 @@ fn done_with_open_children_needs_force_and_hides_the_subtree() {
         },
     )
     .unwrap();
-    assert_eq!(h.paths(""), ["home", "home/weekly"]);
-    let kitchen = h
-        .tree
-        .items()
-        .find(|i| i.title == "kitchen")
-        .unwrap()
-        .clone();
-    assert_eq!(h.tree.status(kitchen.status).unwrap().name, "todo");
+    assert_eq!(h.paths("").len(), 4, "done items stay listed");
+
+    h.archive("home/weekly/renovations", true).unwrap();
+    assert_eq!(h.paths(""), ["/home", "/home/weekly"]);
     assert_eq!(
-        h.paths("is:done"),
-        ["home/weekly/renovations", "home/weekly/renovations/kitchen"]
+        h.paths("is:archived"),
+        [
+            "/home/weekly/renovations",
+            "/home/weekly/renovations/kitchen"
+        ]
+    );
+    let kitchen = h.id("home/weekly/renovations/kitchen");
+    assert_eq!(h.tree.get(kitchen).unwrap().item.archived_at, None);
+    h.assert_matches_rebuild();
+
+    h.archive("home/weekly/renovations", false).unwrap();
+    assert_eq!(h.paths("").len(), 4);
+    assert!(h.paths("is:archived").is_empty());
+    h.assert_matches_rebuild();
+}
+
+#[test]
+fn unarchiving_a_child_unarchives_its_whole_chain() {
+    let mut h = Harness::new();
+    h.add("home/weekly/clean");
+    h.add("home/garden");
+    h.archive("home", true).unwrap();
+    h.archive("home/weekly", true).unwrap();
+    assert!(h.paths("").is_empty());
+
+    let written = h.archive("home/weekly/clean", false).unwrap();
+    let mut updated = written.updated;
+    updated.sort();
+    let mut expected = vec![h.id("home"), h.id("home/weekly"), h.id("home/weekly/clean")];
+    expected.sort();
+    assert_eq!(updated, expected);
+    assert!(h.paths("is:archived").is_empty());
+    assert_eq!(h.paths("").len(), 4);
+    h.assert_matches_rebuild();
+}
+
+#[test]
+fn archived_children_do_not_block_marking_the_parent_done() {
+    let mut h = Harness::new();
+    h.add("home/weekly/clean");
+    h.archive("home/weekly/clean", true).unwrap();
+    assert!(
+        !h.set_status("home/weekly", "done")
+            .unwrap()
+            .updated
+            .is_empty()
+    );
+}
+
+#[test]
+fn tags_keep_their_color_until_deleted() {
+    let mut h = Harness::new();
+    let now = h.now();
+    let id = h
+        .tree
+        .add(
+            &CreateItem {
+                path: "home/fix wifi".into(),
+                tags: vec!["net".into(), "/home".into()],
+                ..Default::default()
+            },
+            now,
+        )
+        .unwrap()
+        .created[1];
+    let fresh = h.tree.tag("net").unwrap().color.unwrap();
+    assert!(
+        TAG_COLORS.contains(&fresh.as_str()),
+        "new tags get a palette color"
+    );
+    h.tree.set_tag_color("NET", Some("blue")).unwrap();
+    h.try_patch(
+        "/home/fix wifi",
+        PatchItem {
+            tags: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        h.tree.tag("net").unwrap().color.as_deref(),
+        Some("blue"),
+        "an unused tag keeps its color"
+    );
+    assert_eq!(
+        h.tree.set_tag_color("nope", Some("red")).unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+
+    h.try_patch(
+        "/home/fix wifi",
+        PatchItem {
+            tags: Some(vec!["/home".into(), "net".into()]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    h.tree.remove_tag("net").unwrap();
+    assert_eq!(h.tree.get(id).unwrap().item.tags, ["/home"]);
+    assert_eq!(
+        h.tree
+            .tags()
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+        ["/home"]
     );
     h.assert_matches_rebuild();
 }
 
 #[test]
-fn reopening_conflicts_when_the_name_was_reused_meanwhile() {
+fn due_dates_are_optional_and_can_be_cleared() {
     let mut h = Harness::new();
-    let first = h.add("home/weekly/buy groceries");
-    h.set_status("home/weekly/buy groceries", "done").unwrap();
-    h.add("home/weekly/buy groceries");
     let now = h.now();
-    let err = h
+    let due = jiff::civil::date(2026, 11, 20);
+    let id = *h
         .tree
-        .update(
-            first,
-            &PatchItem {
-                status: Some("todo".into()),
+        .add(
+            &CreateItem {
+                path: "home/taxes".into(),
+                due: Some(due),
                 ..Default::default()
             },
             now,
         )
-        .unwrap_err();
-    assert_eq!(err.kind, ErrorKind::Conflict);
+        .unwrap()
+        .created
+        .last()
+        .unwrap();
+    assert_eq!(h.tree.view(id).unwrap().due, Some(due));
+    assert_eq!(
+        h.tree.view(h.id("home")).unwrap().due,
+        None,
+        "parents get no due date"
+    );
+
+    h.try_patch(
+        "home/taxes",
+        PatchItem {
+            body: Some("forms".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(h.tree.view(id).unwrap().due, Some(due), "absent keeps it");
+    h.try_patch(
+        "home/taxes",
+        PatchItem {
+            due: Some(None),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(h.tree.view(id).unwrap().due, None, "null clears it");
 }
 
 #[test]
@@ -324,14 +539,14 @@ fn status_changes_stamp_times_and_noop_patches_report_no_change() {
         .update(
             id,
             &PatchItem {
-                status: Some("progress".into()),
+                status: Some("doing".into()),
                 tags: Some(vec!["Net".into()]),
                 ..Default::default()
             },
             now,
         )
         .unwrap();
-    assert!(updated.changed);
+    assert!(!updated.updated.is_empty());
     let item = h.tree.get(id).unwrap().item.clone();
     assert_eq!(item.started_at, Some(now));
     assert_eq!(item.updated_at, now);
@@ -339,10 +554,11 @@ fn status_changes_stamp_times_and_noop_patches_report_no_change() {
 
     let later = h.now();
     assert!(
-        !h.tree
+        h.tree
             .update(id, &PatchItem::default(), later)
             .unwrap()
-            .changed
+            .updated
+            .is_empty()
     );
     assert_eq!(h.tree.get(id).unwrap().item.updated_at, now);
 }
@@ -360,7 +576,7 @@ fn remove_needs_recursive_for_children_and_removes_the_subtree() {
     let removed = h.tree.remove(weekly, true).unwrap();
     assert_eq!(removed.len(), 3);
     assert_eq!(removed.last(), Some(&weekly), "subtree root comes last");
-    assert_eq!(h.paths("is:all"), ["home", "home/garden"]);
+    assert_eq!(h.paths("is:all"), ["/home", "/home/garden"]);
     h.assert_matches_rebuild();
 }
 
@@ -392,17 +608,62 @@ fn list_words_operators_and_subtrees() {
 
     assert_eq!(
         h.paths("renov"),
-        ["home/weekly/renovations", "home/weekly/renovations/kitchen"]
+        [
+            "/home/weekly/renovations",
+            "/home/weekly/renovations/kitchen"
+        ]
     );
-    assert_eq!(h.paths("groc weekly"), ["home/weekly/buy_groceries"]);
-    assert_eq!(h.paths("\"weekly report\""), ["work/weekly_report"]);
-    assert_eq!(h.paths("weekly -home"), ["work/weekly_report"]);
-    assert_eq!(h.paths("+diy"), ["home/weekly/renovations/kitchen"]);
+    assert_eq!(h.paths("groc weekly"), ["/home/weekly/buy_groceries"]);
+    assert_eq!(h.paths("\"weekly report\""), ["/work/weekly_report"]);
+    assert_eq!(h.paths("weekly -home"), ["/work/weekly_report"]);
+    assert_eq!(
+        h.paths("/home/weekly/renovations"),
+        [
+            "/home/weekly/renovations",
+            "/home/weekly/renovations/kitchen"
+        ]
+    );
+    assert!(
+        h.paths("/weekly").is_empty(),
+        "a leading slash anchors at the root"
+    );
+    assert_eq!(h.paths("weekly -/home"), ["/work/weekly_report"]);
+    assert_eq!(h.paths("+diy"), ["/home/weekly/renovations/kitchen"]);
     assert_eq!(
         h.paths("tag:diy kitchen"),
-        ["home/weekly/renovations/kitchen"]
+        ["/home/weekly/renovations/kitchen"]
     );
-    assert_eq!(h.paths("status:progress"), Vec::<String>::new());
+    assert_eq!(h.paths("status:doing"), Vec::<String>::new());
+}
+
+#[test]
+fn typed_status_names_and_labels_filter_by_status() {
+    let mut h = Harness::new();
+    h.add("home/laundry");
+    h.add("home/dishes");
+    h.add("work/todo app");
+    h.set_status("home/dishes", "doing").unwrap();
+    h.tree
+        .add_status(&CreateStatus {
+            name: "review".into(),
+            category: Category::Active,
+            label: Some("In review".into()),
+        })
+        .unwrap();
+    h.set_status("work/todo app", "review").unwrap();
+
+    assert_eq!(h.paths("doing"), ["/home/dishes"]);
+    assert_eq!(h.paths("todo home"), ["/home", "/home/laundry"]);
+    assert_eq!(
+        h.paths("todo doing /home"),
+        ["/home", "/home/dishes", "/home/laundry"]
+    );
+    assert_eq!(h.paths("In Review"), ["/work/todo_app"]);
+    assert_eq!(
+        h.paths("todo_app"),
+        ["/work/todo_app"],
+        "a longer word still searches paths"
+    );
 }
 
 #[test]
@@ -459,7 +720,7 @@ fn rows_with_a_parent_cycle_are_rejected() {
             item.parent = Some(b);
         }
     }
-    let err = Tree::new(seed_statuses(), items, 1).unwrap_err();
+    let err = Tree::new(seed_statuses(), items, vec![], 1).unwrap_err();
     assert_eq!(err.kind, ErrorKind::Internal);
 }
 
@@ -474,9 +735,9 @@ fn incremental_updates_match_a_full_rebuild() {
         (rng % n as u64) as usize
     };
     let words = [
-        "home", "work", "weekly", "kitchen", "garden", "taxes", "car",
+        "/home", "/work", "weekly", "kitchen", "garden", "taxes", "car",
     ];
-    let statuses = ["todo", "progress", "done"];
+    let statuses = ["todo", "doing", "done"];
     for step in 0..1_000 {
         let ids: Vec<ItemId> = h.tree.items().map(|i| i.id).collect();
         let pick = |n: usize| ids[n];
@@ -519,6 +780,15 @@ fn incremental_updates_match_a_full_rebuild() {
             8 if !ids.is_empty() => {
                 let id = pick(next(ids.len()));
                 let _ = h.tree.remove(id, next(4) == 0);
+            }
+            9 if !ids.is_empty() => {
+                let id = pick(next(ids.len()));
+                let now = h.now();
+                let patch = PatchItem {
+                    archived: Some(next(2) == 0),
+                    ..Default::default()
+                };
+                let _ = h.tree.update(id, &patch, now);
             }
             _ => {}
         }

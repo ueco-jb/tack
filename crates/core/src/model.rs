@@ -88,6 +88,14 @@ pub struct Item {
     pub updated_at: Timestamp,
     pub started_at: Option<Timestamp>,
     pub done_at: Option<Timestamp>,
+    pub archived_at: Option<Timestamp>,
+    pub due: Option<jiff::civil::Date>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tag {
+    pub name: String,
+    pub color: Option<String>,
 }
 
 pub const MAX_TAG_CHARS: usize = 32;
@@ -121,6 +129,32 @@ pub fn normalize_tags<S: AsRef<str>>(raw: &[S]) -> Result<Vec<String>> {
     tags.sort();
     tags.dedup();
     Ok(tags)
+}
+
+pub const TAG_COLORS: [&str; 10] = [
+    "red", "orange", "yellow", "green", "teal", "blue", "indigo", "purple", "pink", "gray",
+];
+
+pub fn default_tag_color(name: &str) -> &'static str {
+    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    TAG_COLORS[(hash % TAG_COLORS.len() as u64) as usize]
+}
+
+pub const MAX_COLOR_CHARS: usize = 32;
+
+pub fn normalize_color(raw: &str) -> Result<String> {
+    let color = raw.trim();
+    if color.is_empty()
+        || color.chars().count() > MAX_COLOR_CHARS
+        || color.chars().any(char::is_control)
+    {
+        return Err(Error::invalid(format!(
+            "color must be 1 to {MAX_COLOR_CHARS} characters"
+        )));
+    }
+    Ok(color.to_owned())
 }
 
 pub const MAX_STATUS_NAME_CHARS: usize = 32;
@@ -171,6 +205,8 @@ mod tests {
             updated_at: Timestamp::UNIX_EPOCH,
             started_at: None,
             done_at: None,
+            archived_at: None,
+            due: None,
         }
     }
 
