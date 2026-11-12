@@ -762,10 +762,6 @@ function setSearch(list) {
   load();
 }
 
-function isPlaceToken(t) {
-  return t.startsWith("/") || t === "is:archived";
-}
-
 function activePrefix() {
   const current = tokens();
   const path = current.find((t) => t.startsWith("/")) ?? "";
@@ -785,10 +781,7 @@ function sideEntry(prefix, n, extra = "") {
   const e = el("div", (nested ? "lvl2" : "lvl1") + extra + (prefix === activePrefix() ? " on" : ""),
     el("span", "path", prefix.slice(prefix.lastIndexOf("/") + 1)),
     el("span", "n", String(n)));
-  e.addEventListener("click", () => {
-    const rest = tokens().filter((t) => !isPlaceToken(t));
-    setSearch(prefix === activePrefix() ? rest : [...placeTokens(prefix), ...rest]);
-  });
+  e.addEventListener("click", () => setSearch(prefix === activePrefix() ? [] : placeTokens(prefix)));
   return e;
 }
 
