@@ -5,22 +5,18 @@ use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{self, Json, State};
 use axum::http::StatusCode;
 use axum::middleware;
-use axum::routing::{get, patch};
-use jiff::Timestamp;
+use axum::routing::{get, patch, post};
 use serde::Deserialize;
+use tack_core::Error;
 use tack_core::api::{
     API_PREFIX, CreateItem, CreateStatus, Deleted, Health, ItemList, ItemView, PatchItem,
     PatchStatus, PatchTag, StatusList, TagList,
 };
-use tack_core::model::{Item, ItemId, Status, Tag, whole_seconds};
+use tack_core::model::{Status, Tag};
 use tack_core::path::Target;
-use tack_core::query::Query;
-use tack_core::tree::{Tree, Written};
-use tack_core::{Error, Result};
-use tack_storage::Storage;
 
 use crate::error::ApiError;
-use crate::{Server, hosts, log, web};
+use crate::{Server, blocking, hosts, log, mcp, web};
 
 type ApiResult<T> = std::result::Result<T, ApiError>;
 
@@ -38,25 +34,17 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/tags/{name}", patch(update_tag).delete(remove_tag));
     Router::new()
         .route("/", get(web::index))
+        .route(
+            "/mcp",
+            post(mcp::endpoint)
+                .get(mcp::not_allowed)
+                .delete(mcp::not_allowed),
+        )
         .nest(API_PREFIX, api)
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(server.clone(), hosts::guard))
         .layer(middleware::from_fn_with_state(server.clone(), log::record))
         .with_state(server)
-}
-
-async fn blocking<T: Send + 'static>(
-    server: &Arc<Server>,
-    work: impl FnOnce(&Server) -> Result<T> + Send + 'static,
-) -> Result<T> {
-    let server = server.clone();
-    tokio::task::spawn_blocking(move || work(&server))
-        .await
-        .map_err(|e| Error::internal(format!("worker failed: {e}")))?
-}
-
-fn now() -> Timestamp {
-    whole_seconds(Timestamp::now())
 }
 
 fn target(raw: std::result::Result<extract::Path<String>, PathRejection>) -> ApiResult<Target> {
@@ -85,13 +73,7 @@ async fn list(
     params: std::result::Result<extract::Query<ListParams>, QueryRejection>,
 ) -> ApiResult<Json<ItemList>> {
     let extract::Query(params) = params?;
-    let query = Query::parse(params.q.as_deref().unwrap_or(""))?;
-    let tree = server.tree();
-    let items = tree
-        .list(&query)?
-        .into_iter()
-        .map(|id| tree.view(id))
-        .collect::<Result<_>>()?;
+    let items = server.search(params.q.as_deref().unwrap_or(""))?;
     Ok(Json(ItemList { items }))
 }
 
@@ -100,9 +82,7 @@ async fn show(
     raw: std::result::Result<extract::Path<String>, PathRejection>,
 ) -> ApiResult<Json<ItemView>> {
     let target = target(raw)?;
-    let tree = server.tree();
-    let id = tree.find(&target)?.item.id;
-    Ok(Json(tree.view(id)?))
+    Ok(Json(server.show(&target)?))
 }
 
 async fn create(
@@ -110,33 +90,8 @@ async fn create(
     body: std::result::Result<Json<CreateItem>, JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<ItemView>)> {
     let Json(req) = body?;
-    let view = blocking(&server, move |server| {
-        server.write(
-            |tree| tree.add(&req, now()),
-            |tree, storage, written| {
-                save(tree, storage, &written)?;
-                let last = written
-                    .created
-                    .last()
-                    .ok_or_else(|| Error::internal("add created nothing"))?;
-                tree.view(*last)
-            },
-        )
-    })
-    .await?;
+    let view = blocking(&server, move |server| server.add(&req)).await?;
     Ok((StatusCode::CREATED, Json(view)))
-}
-
-fn save(tree: &Tree, storage: &mut Storage, written: &Written) -> Result<()> {
-    if written.created.is_empty() && written.updated.is_empty() {
-        return Ok(());
-    }
-    let items = |ids: &[ItemId]| -> Vec<&Item> {
-        ids.iter()
-            .filter_map(|id| tree.get(*id).map(|n| &n.item))
-            .collect()
-    };
-    storage.save(&items(&written.created), &items(&written.updated))
 }
 
 async fn update(
@@ -146,20 +101,7 @@ async fn update(
 ) -> ApiResult<Json<ItemView>> {
     let target = target(raw)?;
     let Json(patch) = body?;
-    let view = blocking(&server, move |server| {
-        server.write(
-            |tree| {
-                let id = tree.find(&target)?.item.id;
-                let written = tree.update(id, &patch, now())?;
-                Ok((id, written))
-            },
-            |tree, storage, (id, written)| {
-                save(tree, storage, &written)?;
-                tree.view(id)
-            },
-        )
-    })
-    .await?;
+    let view = blocking(&server, move |server| server.update(&target, &patch)).await?;
     Ok(Json(view))
 }
 
@@ -177,16 +119,7 @@ async fn remove(
     let target = target(raw)?;
     let extract::Query(params) = params?;
     let deleted = blocking(&server, move |server| {
-        server.write(
-            |tree| {
-                let id = tree.find(&target)?.item.id;
-                tree.remove(id, params.recursive)
-            },
-            |_, storage, ids| {
-                storage.delete_items(&ids)?;
-                Ok(ids)
-            },
-        )
+        server.remove(&target, params.recursive)
     })
     .await?;
     Ok(Json(Deleted { deleted }))

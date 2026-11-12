@@ -1,6 +1,7 @@
 mod error;
 mod hosts;
 mod log;
+mod mcp;
 mod routes;
 mod web;
 
@@ -11,7 +12,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use tack_core::tree::Tree;
+use jiff::Timestamp;
+use tack_core::api::{CreateItem, ItemView, PatchItem};
+use tack_core::model::{Item, ItemId, whole_seconds};
+use tack_core::path::Target;
+use tack_core::query::Query;
+use tack_core::tree::{Tree, Written};
 use tack_core::{Error, Result};
 use tack_storage::Storage;
 use tokio::net::TcpListener;
@@ -74,11 +80,93 @@ impl Server {
             }
         })
     }
+
+    fn search(&self, query: &str) -> Result<Vec<ItemView>> {
+        let query = Query::parse(query)?;
+        let tree = self.tree();
+        tree.list(&query)?
+            .into_iter()
+            .map(|id| tree.view(id))
+            .collect()
+    }
+
+    fn show(&self, target: &Target) -> Result<ItemView> {
+        let tree = self.tree();
+        let id = tree.find(target)?.item.id;
+        tree.view(id)
+    }
+
+    fn add(&self, req: &CreateItem) -> Result<ItemView> {
+        self.write(
+            |tree| tree.add(req, now()),
+            |tree, storage, written| {
+                save(tree, storage, &written)?;
+                let last = written
+                    .created
+                    .last()
+                    .ok_or_else(|| Error::internal("add created nothing"))?;
+                tree.view(*last)
+            },
+        )
+    }
+
+    fn update(&self, target: &Target, patch: &PatchItem) -> Result<ItemView> {
+        self.write(
+            |tree| {
+                let id = tree.find(target)?.item.id;
+                let written = tree.update(id, patch, now())?;
+                Ok((id, written))
+            },
+            |tree, storage, (id, written)| {
+                save(tree, storage, &written)?;
+                tree.view(id)
+            },
+        )
+    }
+
+    fn remove(&self, target: &Target, recursive: bool) -> Result<Vec<ItemId>> {
+        self.write(
+            |tree| {
+                let id = tree.find(target)?.item.id;
+                tree.remove(id, recursive)
+            },
+            |_, storage, ids| {
+                storage.delete_items(&ids)?;
+                Ok(ids)
+            },
+        )
+    }
+}
+
+async fn blocking<T: Send + 'static>(
+    server: &Arc<Server>,
+    work: impl FnOnce(&Server) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let server = server.clone();
+    tokio::task::spawn_blocking(move || work(&server))
+        .await
+        .map_err(|e| Error::internal(format!("worker failed: {e}")))?
 }
 
 fn poisoned() -> ! {
     eprintln!("tack: a request panicked while holding a lock; exiting so the service restarts");
     std::process::exit(1);
+}
+
+fn now() -> Timestamp {
+    whole_seconds(Timestamp::now())
+}
+
+fn save(tree: &Tree, storage: &mut Storage, written: &Written) -> Result<()> {
+    if written.created.is_empty() && written.updated.is_empty() {
+        return Ok(());
+    }
+    let items = |ids: &[ItemId]| -> Vec<&Item> {
+        ids.iter()
+            .filter_map(|id| tree.get(*id).map(|n| &n.item))
+            .collect()
+    };
+    storage.save(&items(&written.created), &items(&written.updated))
 }
 
 pub async fn serve(config: Config) -> Result<()> {

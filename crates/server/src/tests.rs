@@ -50,9 +50,19 @@ impl Harness {
         body: Option<Value>,
         headers: &[(header::HeaderName, &str)],
     ) -> (StatusCode, Value) {
-        let mut builder = Request::builder()
-            .method(method)
-            .uri(format!("{API_PREFIX}{uri}"));
+        self.request(client, method, &format!("{API_PREFIX}{uri}"), body, headers)
+            .await
+    }
+
+    async fn request(
+        &self,
+        client: &str,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+        headers: &[(header::HeaderName, &str)],
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
         if !headers.iter().any(|(name, _)| name == header::HOST) {
             builder = builder.header(header::HOST, "pi:15470");
         }
@@ -378,4 +388,209 @@ async fn every_request_except_get_is_logged_with_body_and_error() {
     assert_eq!(lines[1]["path"], format!("{API_PREFIX}/items/nowhere"));
     assert_eq!(lines[1]["status"], 404);
     assert_eq!(lines[1]["error"], "no item at /nowhere");
+}
+
+const MCP_VERSION: &str = "2025-11-25";
+
+fn rpc(method: &str, params: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params })
+}
+
+impl Harness {
+    async fn mcp_with(&self, body: Value, headers: &[(&'static str, &str)]) -> (StatusCode, Value) {
+        let headers: Vec<_> = headers
+            .iter()
+            .map(|(name, value)| (header::HeaderName::from_static(name), *value))
+            .collect();
+        self.request(LAPTOP, Method::POST, "/mcp", Some(body), &headers)
+            .await
+    }
+
+    async fn mcp(&self, method: &str, params: Value) -> (StatusCode, Value) {
+        self.mcp_with(
+            rpc(method, params),
+            &[("mcp-protocol-version", MCP_VERSION)],
+        )
+        .await
+    }
+
+    async fn tool(&self, name: &str, arguments: Value) -> Value {
+        let (status, body) = self
+            .mcp(
+                "tools/call",
+                json!({ "name": name, "arguments": arguments }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body["result"].clone()
+    }
+}
+
+#[tokio::test]
+async fn mcp_handshake_and_tool_list() {
+    let h = Harness::new();
+    let initialize = rpc(
+        "initialize",
+        json!({
+            "protocolVersion": "2099-01-01",
+            "capabilities": {},
+            "clientInfo": { "name": "test", "version": "1" },
+        }),
+    );
+    let (status, body) = h.mcp_with(initialize, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"], 7);
+    assert_eq!(body["result"]["protocolVersion"], MCP_VERSION);
+    assert_eq!(body["result"]["capabilities"], json!({ "tools": {} }));
+    assert_eq!(body["result"]["serverInfo"]["name"], "tack");
+
+    let initialized = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    let (status, _) = h
+        .mcp_with(initialized, &[("mcp-protocol-version", MCP_VERSION)])
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (status, body) = h.mcp("ping", json!({})).await;
+    assert_eq!(
+        (status, body["result"].clone()),
+        (StatusCode::OK, json!({}))
+    );
+
+    let (status, body) = h.mcp("tools/list", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<_> = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["search", "get", "add", "update", "delete", "labels"]
+    );
+}
+
+#[tokio::test]
+async fn mcp_tools_share_the_rules_of_the_api() {
+    let h = Harness::new();
+    let added = h
+        .tool(
+            "add",
+            json!({ "path": "/home/weekly/laundry", "tags": ["chores"], "due": "2026-12-01" }),
+        )
+        .await;
+    assert_eq!(added["isError"], false);
+    assert_eq!(added["structuredContent"]["path"], "/home/weekly/laundry");
+    let text: Value = serde_json::from_str(added["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text, added["structuredContent"]);
+
+    let again = h
+        .tool("add", json!({ "path": "/home/weekly/laundry" }))
+        .await;
+    assert_eq!(again["structuredContent"]["path"], "/home/weekly/laundry-2");
+
+    let found = h
+        .tool("search", json!({ "query": "/home/weekly +chores" }))
+        .await;
+    let items = found["structuredContent"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["due"], "2026-12-01");
+
+    let refused = h
+        .tool(
+            "update",
+            json!({ "item": "/home/weekly", "status": "done" }),
+        )
+        .await;
+    assert_eq!(refused["isError"], true);
+    assert!(
+        refused["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("open items")
+    );
+
+    let forced = h
+        .tool(
+            "update",
+            json!({ "item": "/home/weekly", "status": "done", "force": true, "due": null }),
+        )
+        .await;
+    assert_eq!(forced["structuredContent"]["status"], "done");
+
+    let item = h
+        .tool("get", json!({ "item": "/home/weekly/laundry" }))
+        .await;
+    let id = item["structuredContent"]["id"].as_i64().unwrap();
+    let by_id = h.tool("get", json!({ "item": id })).await;
+    assert_eq!(by_id["structuredContent"], item["structuredContent"]);
+
+    let labels = h.tool("labels", json!({})).await;
+    assert_eq!(labels["structuredContent"]["tags"][0]["name"], "chores");
+    assert_eq!(labels["structuredContent"]["statuses"][1]["name"], "doing");
+
+    let blocked = h.tool("delete", json!({ "item": "/home" })).await;
+    assert_eq!(blocked["isError"], true);
+    let deleted = h
+        .tool("delete", json!({ "item": "/home", "recursive": true }))
+        .await;
+    assert_eq!(
+        deleted["structuredContent"]["deleted"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+
+    let bad = h
+        .tool("add", json!({ "path": "/x", "colour": "red" }))
+        .await;
+    assert_eq!(bad["isError"], true);
+
+    let (status, body) = h
+        .mcp("tools/call", json!({ "name": "nope", "arguments": {} }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["error"]["code"], -32602);
+
+    let loaded = h.server.storage().load().unwrap();
+    assert_eq!(*h.server.tree(), loaded);
+}
+
+#[tokio::test]
+async fn mcp_rejects_other_versions_unknown_methods_and_foreign_origins() {
+    let h = Harness::new();
+    let (status, body) = h
+        .mcp_with(
+            rpc("server/discover", json!({})),
+            &[("mcp-protocol-version", "2026-07-28")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "clients fall back on 400");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(MCP_VERSION)
+    );
+
+    let (status, body) = h.mcp("resources/list", json!({})).await;
+    assert_eq!(
+        (status, body["error"]["code"].clone()),
+        (StatusCode::OK, json!(-32601))
+    );
+
+    let (status, _) = h.request(LAPTOP, Method::GET, "/mcp", None, &[]).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+
+    let (status, _) = h
+        .request(
+            LAPTOP,
+            Method::POST,
+            "/mcp",
+            Some(rpc("ping", json!({}))),
+            &[(header::ORIGIN, "https://evil.example")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
