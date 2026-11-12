@@ -1,0 +1,24 @@
+[package]
+name = "tack_server"
+description = "HTTP API, host guard, the in memory tree and the database writer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tack_core.workspace = true
+tack_storage.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true
