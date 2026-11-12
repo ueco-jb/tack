@@ -10,9 +10,9 @@ fn at(second: i64) -> Timestamp {
     Timestamp::from_second(second).unwrap()
 }
 
-fn create(title: &str) -> CreateItem {
+fn create(path: &str) -> CreateItem {
     CreateItem {
-        title: title.into(),
+        path: path.into(),
         ..Default::default()
     }
 }
@@ -28,7 +28,16 @@ fn add(storage: &mut Storage, tree: &mut Tree, req: &CreateItem, now: Timestamp)
 }
 
 fn update(storage: &mut Storage, tree: &mut Tree, id: ItemId, patch: &PatchItem, now: Timestamp) {
-    if tree.update(id, patch, now).unwrap() {
+    let updated = tree.update(id, patch, now).unwrap();
+    let created: Vec<_> = updated
+        .created
+        .iter()
+        .map(|c| &tree.get(*c).unwrap().item)
+        .collect();
+    if !created.is_empty() {
+        storage.insert_items(&created).unwrap();
+    }
+    if updated.changed {
         storage.update_item(&tree.get(id).unwrap().item).unwrap();
     }
 }
@@ -52,7 +61,7 @@ fn live_tree_equals_a_fresh_load_after_every_kind_of_write() {
         &mut storage,
         &mut tree,
         &CreateItem {
-            title: "home/weekly/buy groceries".into(),
+            path: "home/weekly/buy groceries".into(),
             tags: vec!["food".into(), "shop".into()],
             body: Some("Milk, eggs.".into()),
             ..Default::default()
@@ -73,8 +82,7 @@ fn live_tree_equals_a_fresh_load_after_every_kind_of_write() {
         &mut tree,
         renovations,
         &PatchItem {
-            title: Some("flat".into()),
-            parent: Some(Some("work".parse().unwrap())),
+            path: Some("work/archive/flat".into()),
             status: Some("progress".into()),
             ..Default::default()
         },
@@ -108,7 +116,15 @@ fn live_tree_equals_a_fresh_load_after_every_kind_of_write() {
 
     assert_eq!(tree, storage.load().unwrap());
     let paths: Vec<_> = tree.iter().map(|n| n.path.to_string()).collect();
-    assert_eq!(paths, ["work", "work/flat", "work/flat/kitchen"]);
+    assert_eq!(
+        paths,
+        [
+            "work",
+            "work/archive",
+            "work/archive/flat",
+            "work/archive/flat/kitchen"
+        ]
+    );
 }
 
 #[test]
@@ -157,4 +173,17 @@ fn file_database_reopens_without_reusing_ids_and_rejects_newer_schema() {
         .err()
         .expect("newer schema must be rejected");
     assert!(err.message.contains("newer"), "{}", err.message);
+}
+
+#[test]
+fn allowed_clients_round_trip_and_reject_duplicates() {
+    let mut storage = Storage::open_in_memory().unwrap();
+    assert!(storage.allowed_clients().unwrap().is_empty());
+    let laptop: std::net::IpAddr = "192.168.1.20".parse().unwrap();
+    storage.allow_client(laptop).unwrap();
+    assert_eq!(storage.allowed_clients().unwrap(), [laptop]);
+    assert_eq!(
+        storage.allow_client(laptop).unwrap_err().kind,
+        ErrorKind::Conflict
+    );
 }

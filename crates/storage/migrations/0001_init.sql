@@ -13,7 +13,6 @@ CREATE TABLE item (
     name       TEXT    GENERATED ALWAYS AS (replace(title, ' ', '_')) STORED,
     body       TEXT    NOT NULL DEFAULT '',
     status_id  INTEGER NOT NULL REFERENCES status (id),
-    priority   INTEGER NOT NULL DEFAULT 0 CHECK (priority BETWEEN 0 AND 3),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     started_at INTEGER,
@@ -34,6 +33,10 @@ CREATE TABLE item_tag (
     item_id INTEGER NOT NULL REFERENCES item (id) ON DELETE CASCADE,
     tag_id  INTEGER NOT NULL REFERENCES tag (id),
     PRIMARY KEY (item_id, tag_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE allowed_client (
+    ip TEXT PRIMARY KEY
 ) STRICT, WITHOUT ROWID;
 
 INSERT INTO status (name, label, category, position) VALUES

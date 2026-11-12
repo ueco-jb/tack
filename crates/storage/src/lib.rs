@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::Path;
 
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use tack_core::model::{Category, Item, ItemId, Priority, Status, StatusId};
+use tack_core::model::{Category, Item, ItemId, Status, StatusId};
 use tack_core::tree::Tree;
 use tack_core::{Error, Result};
 
@@ -119,7 +120,7 @@ impl Storage {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, parent_id, title, body, status_id, priority, \
+                "SELECT id, parent_id, title, body, status_id, \
                  created_at, updated_at, started_at, done_at FROM item",
             )
             .map_err(db)?;
@@ -131,16 +132,15 @@ impl Storage {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, u8>(5)?,
+                    row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<i64>>(7)?,
                     row.get::<_, Option<i64>>(8)?,
-                    row.get::<_, Option<i64>>(9)?,
                 ))
             })
             .map_err(db)?
             .map(|row| {
-                let (id, parent, title, body, status, priority, created, updated, started, done) =
+                let (id, parent, title, body, status, created, updated, started, done) =
                     row.map_err(db)?;
                 Ok(Item {
                     id: ItemId(id),
@@ -148,7 +148,6 @@ impl Storage {
                     title,
                     body,
                     status: StatusId(status),
-                    priority: Priority::new(priority)?,
                     tags: tags.remove(&id).unwrap_or_default(),
                     created_at: from_secs(created)?,
                     updated_at: from_secs(updated)?,
@@ -175,16 +174,15 @@ impl Storage {
         let tx = self.conn.transaction().map_err(db)?;
         for item in items {
             tx.execute(
-                "INSERT INTO item (id, parent_id, title, body, status_id, priority, \
+                "INSERT INTO item (id, parent_id, title, body, status_id, \
                  created_at, updated_at, started_at, done_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     item.id.0,
                     item.parent.map(|p| p.0),
                     item.title,
                     item.body,
                     item.status.0,
-                    item.priority.get(),
                     item.created_at.as_second(),
                     item.updated_at.as_second(),
                     item.started_at.map(|t| t.as_second()),
@@ -202,14 +200,13 @@ impl Storage {
         let updated = tx
             .execute(
                 "UPDATE item SET parent_id = ?2, title = ?3, body = ?4, status_id = ?5, \
-                 priority = ?6, updated_at = ?7, started_at = ?8, done_at = ?9 WHERE id = ?1",
+                 updated_at = ?6, started_at = ?7, done_at = ?8 WHERE id = ?1",
                 params![
                     item.id.0,
                     item.parent.map(|p| p.0),
                     item.title,
                     item.body,
                     item.status.0,
-                    item.priority.get(),
                     item.updated_at.as_second(),
                     item.started_at.map(|t| t.as_second()),
                     item.done_at.map(|t| t.as_second()),
@@ -276,6 +273,31 @@ impl Storage {
     pub fn delete_status(&mut self, id: StatusId) -> Result<()> {
         self.conn
             .execute("DELETE FROM status WHERE id = ?1", [id.0])
+            .map_err(db)?;
+        Ok(())
+    }
+    pub fn allowed_clients(&self) -> Result<Vec<IpAddr>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT ip FROM allowed_client ORDER BY ip")
+            .map_err(db)?;
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .map_err(db)?
+            .map(|row| {
+                let ip = row.map_err(db)?;
+                ip.parse().map_err(|_| {
+                    Error::internal(format!("stored client address {ip:?} is not an IP address"))
+                })
+            })
+            .collect()
+    }
+
+    pub fn allow_client(&mut self, ip: IpAddr) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO allowed_client (ip) VALUES (?1)",
+                [ip.to_string()],
+            )
             .map_err(db)?;
         Ok(())
     }
