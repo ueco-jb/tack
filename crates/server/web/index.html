@@ -1,0 +1,925 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tack</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbfa;
+  --fg: #1d1d1f;
+  --muted: #8a8a8e;
+  --line: #e4e4e2;
+  --row: #f0f0ee;
+  --select: #e3ecfb;
+  --accent: #2f6fdb;
+  --mark: #ffe58a;
+  --error: #c62828;
+  --todo: #4f63d2;
+  --active: #c27803;
+  --done: #15803d;
+  --due: #c94a4a;
+  --mono: ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181a;
+    --fg: #e6e6e6;
+    --muted: #7c7f86;
+    --line: #2a2c30;
+    --row: #1f2124;
+    --select: #233350;
+    --accent: #7aa7ff;
+    --mark: #6b5a12;
+    --error: #ff6b6b;
+    --todo: #8f9cf5;
+    --active: #f5b14c;
+    --done: #4ade80;
+    --due: #ff8a80;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { display: grid; grid-template-rows: auto 1fr auto; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+#search { flex: 1; font: 15px var(--mono); color: inherit; background: var(--row); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+#search:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+#search::-webkit-search-cancel-button { display: none; }
+#clear { width: 34px; height: 34px; flex: none; font: 20px/1 system-ui, sans-serif; color: var(--muted); background: var(--row); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+#clear:hover { color: var(--fg); border-color: var(--accent); }
+#count { color: var(--muted); white-space: nowrap; }
+main { min-height: 0; overflow: auto; }
+footer { display: flex; justify-content: space-between; gap: 12px; padding: 6px 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+#error { color: var(--error); }
+mark { background: var(--mark); color: inherit; border-radius: 2px; }
+
+.chip { --c: var(--todo); min-width: 3.75rem; text-align: center; font: 12px system-ui, sans-serif; color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c) 40%, transparent); border-radius: 999px; padding: 1px 9px; cursor: pointer; white-space: nowrap; justify-self: start; }
+.chip:hover { background: color-mix(in srgb, var(--c) 26%, transparent); }
+.chip.active { --c: var(--active); }
+.chip.done { --c: var(--done); }
+.chip.done + .path, .chip.done + .main .path { color: color-mix(in srgb, var(--done) 45%, var(--muted)); }
+
+.switch { display: flex; gap: 6px; margin: 4px 0 12px; }
+.switch .chip { padding: 4px 14px; font-size: 13px; opacity: 0.55; }
+.switch .chip.on { opacity: 1; color: var(--bg); background: var(--c); border-color: var(--c); }
+
+.tags { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.tag { --c: #6a737d; display: inline-flex; align-items: center; gap: 4px; font: 12px system-ui, sans-serif; color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c) 40%, transparent); border-radius: 999px; padding: 0 8px; cursor: pointer; white-space: nowrap; }
+.tag:hover { background: color-mix(in srgb, var(--c) 26%, transparent); }
+.tag .x { opacity: 0.6; }
+.tag .x:hover { opacity: 1; }
+.tag .dot { width: 8px; height: 8px; }
+.add-tag { font: 12px system-ui, sans-serif; color: var(--muted); background: none; border: 1px dashed var(--line); border-radius: 999px; padding: 0 8px; cursor: pointer; }
+.picker { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); box-shadow: 0 8px 24px rgb(0 0 0 / 18%); padding: 6px; margin: 8px 0 12px; }
+.picker input { width: 100%; font: 13px var(--mono); color: inherit; background: var(--row); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+.picker input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.picker ul { list-style: none; margin: 6px 0 0; padding: 0; max-height: 16rem; overflow-y: auto; }
+.picker li { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 4px; cursor: pointer; }
+.picker li:hover { background: var(--row); }
+.picker li.palette { flex-wrap: wrap; padding-left: 26px; cursor: default; }
+.picker li.palette:hover { background: none; }
+.dot { --c: #6a737d; width: 12px; height: 12px; border-radius: 50%; background: var(--c); border: none; padding: 0; flex: none; cursor: pointer; }
+.palette .dot { width: 18px; height: 18px; }
+.palette .dot.on { outline: 2px solid var(--fg); outline-offset: 1px; }
+.pane .palette { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 4px; }
+.link { margin-left: auto; font: 12px system-ui, sans-serif; color: var(--error); background: none; border: none; cursor: pointer; }
+
+.rows { list-style: none; margin: 0; padding: 4px 0; overflow-y: auto; display: grid; grid-template-columns: max-content minmax(0, 1fr); align-content: start; }
+.row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; gap: 10px; align-items: baseline; padding: 3px 14px; cursor: default; }
+.row .chip { justify-self: end; }
+.row .main { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.row .path { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .tags { flex: none; }
+.due { --heat: 0%; flex: none; font: 12px system-ui, sans-serif; white-space: nowrap; color: color-mix(in srgb, var(--due) var(--heat), var(--muted)); }
+.due.late { background: color-mix(in srgb, var(--due) 12%, transparent); border-radius: 999px; padding: 0 7px; }
+.due-field { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; }
+.due-field input { font: 13px system-ui, sans-serif; color: inherit; background: var(--row); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+.due-field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.due-field button { font: 14px/1 system-ui, sans-serif; color: var(--muted); background: none; border: none; cursor: pointer; }
+.row:hover { background: var(--row); }
+.row.sel { background: var(--select); }
+.row.dir .path { font-weight: 600; }
+.path { font-family: var(--mono); overflow-wrap: anywhere; }
+.n { color: var(--muted); font-size: 12px; }
+
+.three { display: grid; grid-template-columns: var(--side, 240px) 5px minmax(12rem, 1fr) 5px var(--pane, 420px); height: 100%; }
+.three .side { border-right: none; }
+.three .pane { border-left: none; }
+.handle { cursor: col-resize; border-left: 1px solid var(--line); touch-action: none; }
+.handle:hover, .handle.drag { border-left: 3px solid var(--accent); }
+.side { border-right: 1px solid var(--line); overflow-y: auto; padding: 4px 0; }
+.side div { display: flex; justify-content: space-between; padding: 3px 14px; cursor: default; }
+.side div:hover { background: var(--row); }
+.side .lvl1 { font-weight: 600; }
+.side .lvl2 { padding-left: 28px; }
+.side .on { background: var(--select); }
+.side .archive { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+
+.pane { border-left: 1px solid var(--line); padding: 14px; overflow-y: auto; }
+.pane .title-input { display: block; width: calc(100% + 8px); margin: 0 -4px 2px; padding: 2px 4px; font: 600 18px system-ui, sans-serif; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 6px; }
+.pane .title-input:hover { border-color: var(--line); }
+.pane .title-input:focus, .pane .body:focus { outline: 2px solid var(--accent); outline-offset: -1px; background: var(--row); }
+.pane .path-line { font-family: var(--mono); margin: 0 0 10px; overflow-wrap: anywhere; }
+.pane .tags { justify-content: flex-start; align-items: center; }
+.pane .body { display: block; width: 100%; min-height: 9rem; margin: 12px 0; padding: 8px; resize: vertical; font: inherit; color: inherit; background: var(--row); border: 1px solid transparent; border-radius: 6px; }
+.pane .actions { justify-content: flex-start; margin-top: 12px; }
+.meta { color: var(--muted); font-size: 12px; }
+
+dialog { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; max-width: 30rem; box-shadow: 0 12px 40px rgb(0 0 0 / 30%); }
+dialog::backdrop { background: rgb(0 0 0 / 35%); }
+dialog h3 { margin: 0 0 6px; font: 600 15px var(--mono); overflow-wrap: anywhere; }
+dialog p { margin: 0 0 16px; color: var(--muted); }
+.actions { display: flex; justify-content: flex-end; gap: 8px; }
+.btn { font: inherit; color: inherit; background: var(--row); border: 1px solid var(--line); border-radius: 6px; padding: 5px 14px; cursor: pointer; }
+.btn:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.btn.primary { --c: var(--done); color: var(--bg); background: var(--c); border-color: var(--c); }
+.btn.primary.danger { --c: var(--error); }
+.btn.delete { color: var(--error); }
+.row.hint { color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body>
+<header>
+  <button id="clear" title="clear the search (Esc)">×</button>
+  <input id="search" type="search" placeholder="search   word  /path  todo  doing  done  -word  +tag  is:archived  is:all" autocomplete="off" spellcheck="false">
+  <span id="count"></span>
+</header>
+<main id="view"></main>
+<dialog id="modal">
+  <h3 id="modal-title"></h3>
+  <p id="modal-text"></p>
+  <div class="actions">
+    <button id="modal-cancel" class="btn">Cancel</button>
+    <button id="modal-ok" class="btn primary"></button>
+  </div>
+</dialog>
+<footer>
+  <span id="error"></span>
+  <span>Enter on no match adds it · Esc clear search · / search · click a category or tag to filter, again to remove · j k select · x next status</span>
+</footer>
+<script>
+"use strict";
+
+const API = "/api/v1";
+const NEXT = { todo: "active", active: "done", done: "todo" };
+const PALETTE = {
+  red: "#d73a49",
+  orange: "#e36209",
+  yellow: "#b08800",
+  green: "#22863a",
+  teal: "#0f8b8d",
+  blue: "#0366d6",
+  indigo: "#5a55d6",
+  purple: "#6f42c1",
+  pink: "#d03592",
+  gray: "#6a737d",
+};
+const $ = (id) => document.getElementById(id);
+const search = $("search");
+const view = $("view");
+const count = $("count");
+const errorLine = $("error");
+const modal = $("modal");
+const widths = { side: 240, pane: 420, ...JSON.parse(localStorage.getItem("tack.widths") ?? "{}") };
+
+const ARCHIVED = "/archived";
+let items = [];
+let listedItems = [];
+let archivedItems = [];
+let archivedIds = new Set();
+let statuses = [];
+let tagList = [];
+let byId = new Map();
+let pending = null;
+let loading = Promise.resolve();
+const ui = {
+  selectedId: null,
+  selectedIndex: 0,
+  shown: null,
+  picker: null,
+  colorFor: null,
+};
+
+function el(tag, cls, ...children) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  e.append(...children);
+  return e;
+}
+
+function ask(title, text, ok, danger = false) {
+  return new Promise((resolve) => {
+    $("modal-title").textContent = title;
+    $("modal-text").textContent = text;
+    $("modal-ok").textContent = ok;
+    $("modal-ok").classList.toggle("danger", danger);
+    const finish = (answer) => {
+      modal.close();
+      resolve(answer);
+    };
+    $("modal-ok").onclick = () => finish(true);
+    $("modal-cancel").onclick = () => finish(false);
+    modal.oncancel = (event) => {
+      event.preventDefault();
+      finish(false);
+    };
+    modal.showModal();
+    $("modal-ok").focus();
+  });
+}
+
+function handle(key, sign) {
+  const h = el("div", "handle");
+  h.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    h.setPointerCapture(event.pointerId);
+    h.classList.add("drag");
+    const grid = h.parentElement;
+    const startX = event.clientX;
+    const start = widths[key];
+    const move = (e) => {
+      widths[key] = Math.round(Math.max(160, Math.min(start + sign * (e.clientX - startX), window.innerWidth - 420)));
+      grid.style.setProperty("--" + key, widths[key] + "px");
+    };
+    const up = () => {
+      h.classList.remove("drag");
+      h.removeEventListener("pointermove", move);
+      h.removeEventListener("pointerup", up);
+      localStorage.setItem("tack.widths", JSON.stringify(widths));
+    };
+    h.addEventListener("pointermove", move);
+    h.addEventListener("pointerup", up);
+  });
+  return h;
+}
+
+async function send(method, path, data) {
+  const init = { method };
+  if (data !== undefined) {
+    init.headers = { "content-type": "application/json" };
+    init.body = JSON.stringify(data);
+  }
+  const res = await fetch(API + path, init);
+  const json = res.status === 204 ? null : await res.json();
+  if (!res.ok) {
+    const error = new Error(json?.error?.message ?? res.statusText);
+    error.kind = json?.error?.kind;
+    throw error;
+  }
+  return json;
+}
+
+function parentPath(path) {
+  const k = path.lastIndexOf("/");
+  return k < 0 ? "" : path.slice(0, k);
+}
+
+function category(status) {
+  return statuses.find((s) => s.name === status)?.category ?? "todo";
+}
+
+function label(status) {
+  return statuses.find((s) => s.name === status)?.label ?? status;
+}
+
+function statusAt(list, i) {
+  for (const s of statuses) {
+    for (const phrase of [s.name, s.label.toLowerCase().split(/[\s_]+/).join("_")]) {
+      if (list[i] === phrase) return [s.name, 1];
+      const parts = phrase.split("_");
+      if (parts.length > 1 && parts.every((part, k) => list[i + k] === part)) return [s.name, parts.length];
+    }
+  }
+  return null;
+}
+
+function words() {
+  const all = search.value
+    .toLowerCase()
+    .replace(/"/g, " ")
+    .split(/\s+/)
+    .filter((w) => w && !/^[-+]/.test(w) && !/^(is|status|tag):/.test(w));
+  const out = [];
+  for (let i = 0; i < all.length; ) {
+    const hit = statusAt(all, i);
+    if (hit) {
+      i += hit[1];
+    } else {
+      out.push(all[i]);
+      i += 1;
+    }
+  }
+  return out;
+}
+
+function draftFromSearch() {
+  const raw = search.value.trim().split(/\s+/).filter(Boolean);
+  const lower = raw.map((t) => t.toLowerCase());
+  const draft = { tags: [], status: null };
+  const plain = [];
+  for (let i = 0; i < raw.length; ) {
+    const t = raw[i];
+    const op = /^(is|tag|status):(.*)$/i.exec(t);
+    const hit = op || t.startsWith("+") || t.startsWith("-") ? null : statusAt(lower, i);
+    if (hit) {
+      draft.status = hit[0];
+      i += hit[1];
+      continue;
+    }
+    if (t.startsWith("+") && t.length > 1) draft.tags.push(t.slice(1));
+    else if (op && op[1].toLowerCase() === "tag" && op[2]) draft.tags.push(op[2]);
+    else if (op && op[1].toLowerCase() === "status" && op[2]) draft.status = op[2];
+    else if (!op && !t.startsWith("-")) plain.push(t);
+    i += 1;
+  }
+  const known = new Set([...listedItems, ...archivedItems].map((x) => x.path));
+  const [first, ...more] = plain;
+  draft.path = first?.startsWith("/") && more.length && known.has(first.toLowerCase())
+    ? first + "/" + more.join(" ")
+    : plain.join(" ");
+  return draft;
+}
+
+async function createFromSearch() {
+  const draft = draftFromSearch();
+  if (!draft.path) return;
+  const body = { path: draft.path };
+  if (draft.tags.length) body.tags = draft.tags;
+  if (draft.status) body.status = draft.status;
+  try {
+    const created = await send("POST", "/items", body);
+    ui.selectedId = created.id;
+    search.blur();
+    setSearch([parentPath(created.path)].filter(Boolean));
+  } catch (e) {
+    errorLine.textContent = e.message;
+  }
+}
+
+function highlight(text) {
+  const marked = new Array(text.length).fill(false);
+  for (const w of document.activeElement === search ? words() : []) {
+    for (let i = text.indexOf(w); i >= 0; i = text.indexOf(w, i + w.length)) {
+      marked.fill(true, i, i + w.length);
+    }
+  }
+  const frag = document.createDocumentFragment();
+  let start = 0;
+  for (let i = 1; i <= text.length; i++) {
+    if (i < text.length && marked[i] === marked[start]) continue;
+    const part = text.slice(start, i);
+    frag.append(marked[start] ? el("mark", "", part) : part);
+    start = i;
+  }
+  return frag;
+}
+
+async function patchItem(item, data) {
+  try {
+    await send("PATCH", "/items/" + item.id, data);
+    errorLine.textContent = "";
+  } catch (e) {
+    if (e.kind === "conflict" && data.status && category(data.status) === "done" && !data.force
+        && await ask(item.path, "Some items under it are still open. Mark it done anyway? The open items keep their own status.", "Mark done")) {
+      return patchItem(item, { ...data, force: true });
+    }
+    errorLine.textContent = e.message;
+  }
+  await load();
+}
+
+function setCategory(item, cat) {
+  const target = statuses.find((s) => s.category === cat);
+  if (target && target.name !== item.status) return patchItem(item, { status: target.name });
+}
+
+function chip(i) {
+  const cat = category(i.status);
+  const b = el("button", "chip " + cat, label(i.status));
+  b.title = "change to " + label(statuses.find((s) => s.category === NEXT[cat])?.name);
+  b.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setCategory(i, NEXT[cat]);
+  });
+  return b;
+}
+
+function switcher(i) {
+  const cat = category(i.status);
+  return el("div", "switch", ...["todo", "active", "done"].map((c) => {
+    const status = statuses.find((s) => s.category === c);
+    const b = el("button", "chip " + c + (c === cat ? " on" : ""), status.label);
+    b.addEventListener("click", () => setCategory(i, c));
+    return b;
+  }));
+}
+
+function tagColor(tag) {
+  return PALETTE[tagList.find((t) => t.name === tag)?.color] ?? PALETTE.gray;
+}
+
+function tagChip(tag, onRemove) {
+  const t = el("span", "tag", tag);
+  t.style.setProperty("--c", tagColor(tag));
+  t.title = "show items tagged " + tag;
+  t.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const token = "+" + tag;
+    const current = tokens();
+    setSearch(current.includes(token) ? current.filter((t) => t !== token) : [...current, token]);
+  });
+  if (onRemove) {
+    const x = el("span", "x", "×");
+    x.title = "remove " + tag;
+    x.addEventListener("click", (event) => {
+      event.stopPropagation();
+      onRemove();
+    });
+    t.append(x);
+  }
+  return t;
+}
+
+function tagsOf(i) {
+  return el("span", "tags", ...i.tags.map((t) => tagChip(t)));
+}
+
+async function tagRequest(method, tag, data) {
+  try {
+    await send(method, "/tags/" + encodeURIComponent(tag), data);
+    errorLine.textContent = "";
+  } catch (e) {
+    errorLine.textContent = e.message;
+  }
+  await load();
+}
+
+function addTag(i, tag) {
+  ui.picker.filter = "";
+  return patchItem(i, { tags: [...i.tags, tag] });
+}
+
+function createTag(i, tag) {
+  ui.picker.filter = "";
+  return patchItem(i, { tags: [...i.tags, tag] });
+}
+
+function palette(tag) {
+  const current = tagList.find((t) => t.name === tag)?.color;
+  const swatches = Object.entries(PALETTE).map(([colorName, value]) => {
+    const d = el("button", "dot" + (current === colorName ? " on" : ""));
+    d.style.setProperty("--c", value);
+    d.title = colorName;
+    d.addEventListener("click", (event) => {
+      event.stopPropagation();
+      tagRequest("PATCH", tag, { color: colorName });
+    });
+    return d;
+  });
+  const remove = el("button", "link", "delete tag");
+  remove.addEventListener("click", (event) => {
+    event.stopPropagation();
+    ui.colorFor = null;
+    if (ui.picker) ui.picker.palette = null;
+    tagRequest("DELETE", tag);
+  });
+  return [...swatches, remove];
+}
+
+function colorDot(tag, onClick) {
+  const dot = el("button", "dot");
+  dot.style.setProperty("--c", tagColor(tag));
+  dot.title = "change color";
+  dot.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  return dot;
+}
+
+function tagOption(i, t) {
+  const dot = colorDot(t.name, () => {
+    ui.picker.palette = ui.picker.palette === t.name ? null : t.name;
+    render();
+  });
+  const li = el("li", "", dot, t.name);
+  li.addEventListener("click", () => addTag(i, t.name));
+  if (ui.picker.palette !== t.name) return [li];
+  return [li, el("li", "palette", ...palette(t.name))];
+}
+
+function picker(i) {
+  const input = el("input");
+  input.placeholder = "filter or create a tag";
+  input.spellcheck = false;
+  input.value = ui.picker.filter;
+  const list = el("ul");
+  const fill = () => {
+    ui.picker.filter = input.value;
+    const f = input.value.trim().toLowerCase();
+    const options = tagList
+      .filter((t) => !i.tags.includes(t.name) && t.name.includes(f))
+      .flatMap((t) => tagOption(i, t));
+    if (f && !tagList.some((t) => t.name === f)) {
+      const create = el("li", "", el("span", "dot"), "create “" + f + "”");
+      create.addEventListener("click", () => createTag(i, f));
+      options.push(create);
+    }
+    list.replaceChildren(...options);
+  };
+  input.addEventListener("input", fill);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      ui.picker = null;
+      render();
+    } else if (event.key === "Enter") {
+      const f = input.value.trim().toLowerCase();
+      if (!f || i.tags.includes(f)) return;
+      if (tagList.some((t) => t.name === f)) addTag(i, f);
+      else createTag(i, f);
+    }
+  });
+  fill();
+  queueMicrotask(() => input.focus());
+  return el("div", "picker", input, list);
+}
+
+function tagEditor(i) {
+  const add = el("button", "add-tag", "+ tag");
+  add.addEventListener("click", () => {
+    ui.picker = ui.picker?.item === i.id ? null : { item: i.id, filter: "", palette: null };
+    render();
+  });
+  const chips = i.tags.map((t) => {
+    const c = tagChip(t, () => patchItem(i, { tags: i.tags.filter((x) => x !== t) }));
+    c.prepend(colorDot(t, () => {
+      ui.colorFor = ui.colorFor === t ? null : t;
+      render();
+    }));
+    return c;
+  });
+  const wrap = el("div", "", el("div", "tags", ...chips, add));
+  if (ui.colorFor && i.tags.includes(ui.colorFor)) {
+    wrap.append(el("div", "palette", el("span", "meta", ui.colorFor), ...palette(ui.colorFor)));
+  }
+  if (ui.picker?.item === i.id) wrap.append(picker(i));
+  return wrap;
+}
+
+async function removeItem(i) {
+  const under = [...listedItems, ...archivedItems].filter((x) => x.path.startsWith(i.path + "/")).length;
+  if (under) {
+    const what = under === 1 ? "the item under it" : "the " + under + " items under it";
+    if (!(await ask(displayPath(i), "Delete it together with " + what + "? This cannot be undone.", "Delete", true))) return;
+  }
+  try {
+    await send("DELETE", "/items/" + i.id + (under ? "?recursive=true" : ""));
+    errorLine.textContent = "";
+  } catch (e) {
+    errorLine.textContent = e.message;
+  }
+  await load();
+}
+
+function deleteButton(i) {
+  const b = el("button", "btn delete", "Delete");
+  b.addEventListener("click", () => removeItem(i));
+  return b;
+}
+
+function archiveButton(i) {
+  const archived = archivedIds.has(i.id);
+  const b = el("button", "btn", archived ? "Unarchive" : "Archive");
+  b.addEventListener("click", () => patchItem(i, { archived: !archived }));
+  return b;
+}
+
+function row(i, text = i.path) {
+  const path = el("span", "path", highlight(text));
+  path.title = i.path;
+  const parts = [path];
+  if (i.due) parts.push(dueLabel(i));
+  parts.push(tagsOf(i));
+  return el("li", "row", chip(i), el("span", "main", ...parts));
+}
+
+function daysUntil(due) {
+  const [y, m, d] = due.split("-").map(Number);
+  const now = new Date();
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((Date.UTC(y, m - 1, d) - today) / 86400000);
+}
+
+function dueText(due, days) {
+  if (days === 0) return "today";
+  if (days === 1) return "tomorrow";
+  if (days < 0) return -days + "d late";
+  if (days < 14) return "in " + days + "d";
+  const [y, m, d] = due.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString(undefined, { day: "numeric", month: "short", timeZone: "UTC" });
+}
+
+function dueLabel(i) {
+  const days = daysUntil(i.due);
+  const done = category(i.status) === "done";
+  const label = el("span", "due", dueText(i.due, days));
+  label.title = "due " + i.due;
+  const heat = done ? 0 : days < 0 ? 85 : Math.round(Math.max(0, Math.min(1, (14 - days) / 14)) * 70);
+  label.style.setProperty("--heat", heat + "%");
+  if (!done && days < 0) label.classList.add("late");
+  return label;
+}
+
+function dueEditor(i) {
+  const input = el("input");
+  input.type = "date";
+  input.value = i.due ?? "";
+  input.addEventListener("change", () => patchItem(i, { due: input.value || null }));
+  const field = el("div", "due-field meta", "due", input);
+  if (i.due) {
+    field.append(dueLabel(i));
+    const clear = el("button", "", "×");
+    clear.title = "remove due date";
+    clear.addEventListener("click", () => patchItem(i, { due: null }));
+    field.append(clear);
+  }
+  return field;
+}
+
+function titleEditor(i) {
+  const input = el("input", "title-input");
+  input.value = i.title;
+  input.spellcheck = false;
+  input.title = "rename";
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      input.blur();
+    } else if (event.key === "Escape") {
+      input.value = i.title;
+      input.blur();
+    }
+  });
+  input.addEventListener("blur", () => {
+    const title = input.value.trim();
+    if (!title || title === i.title) {
+      input.value = i.title;
+      return;
+    }
+    patchItem(i, { path: parentPath(i.path) + "/" + title });
+  });
+  return input;
+}
+
+function bodyEditor(i) {
+  const area = el("textarea", "body");
+  area.value = i.body;
+  area.placeholder = "description";
+  area.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      area.value = i.body;
+      area.blur();
+    } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      area.blur();
+    }
+  });
+  area.addEventListener("blur", () => {
+    if (area.value !== i.body) patchItem(i, { body: area.value });
+  });
+  return area;
+}
+
+function info(i) {
+  const times = [["created", i.created_at], ["updated", i.updated_at]]
+    .filter(([, t]) => t)
+    .map(([what, t]) => what + " " + t.replace("T", " ").replace("Z", ""))
+    .join(" · ");
+  return el("div", "pane",
+    titleEditor(i),
+    el("p", "meta path-line", displayPath(i)),
+    switcher(i),
+    dueEditor(i),
+    tagEditor(i),
+    bodyEditor(i),
+    el("p", "meta", times),
+    el("div", "actions", archiveButton(i), deleteButton(i)));
+}
+
+function displayPath(i) {
+  return archivedIds.has(i.id) ? ARCHIVED + i.path : i.path;
+}
+
+function selectable(shown) {
+  if (!shown.length && search.value.trim()) {
+    ui.shown = shown;
+    const path = draftFromSearch().path;
+    return el("ul", "rows", el("li", "row hint", el("span", ""), el("span", "main",
+      path ? "nothing found · Enter adds " + (path.startsWith("/") ? path : "/" + path) : "nothing found")));
+  }
+  ui.shown = shown;
+  let index = shown.findIndex((i) => i.id === ui.selectedId);
+  if (index < 0) index = Math.min(ui.selectedIndex, shown.length - 1);
+  ui.selectedIndex = Math.max(index, 0);
+  ui.selectedId = shown[index]?.id ?? null;
+  return el("ul", "rows", ...shown.map((i) => {
+    const li = row(i, displayPath(i));
+    if (i.id === ui.selectedId) li.classList.add("sel");
+    li.addEventListener("click", () => {
+      ui.selectedId = i.id;
+      render();
+    });
+    return li;
+  }));
+}
+
+function pane() {
+  const item = byId.get(ui.selectedId);
+  return item ? info(item) : el("div", "pane");
+}
+
+function prefixCounts(list) {
+  const counts = new Map();
+  for (const i of list) {
+    const segments = displayPath(i).slice(1).split("/");
+    for (let d = 1; d <= Math.min(2, segments.length); d++) {
+      const prefix = "/" + segments.slice(0, d).join("/");
+      counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+function tokens() {
+  return search.value.split(/\s+/).filter(Boolean);
+}
+
+function setSearch(list) {
+  search.value = list.join(" ");
+  errorLine.textContent = "";
+  load();
+}
+
+function isPlaceToken(t) {
+  return t.startsWith("/") || t === "is:archived";
+}
+
+function activePrefix() {
+  const current = tokens();
+  const path = current.find((t) => t.startsWith("/")) ?? "";
+  return current.includes("is:archived") ? ARCHIVED + path : path;
+}
+
+function placeTokens(prefix) {
+  if (prefix === ARCHIVED || prefix.startsWith(ARCHIVED + "/")) {
+    const path = prefix.slice(ARCHIVED.length);
+    return path ? ["is:archived", path] : ["is:archived"];
+  }
+  return [prefix];
+}
+
+function sideEntry(prefix, n, extra = "") {
+  const nested = prefix.indexOf("/", 1) > 0;
+  const e = el("div", (nested ? "lvl2" : "lvl1") + extra + (prefix === activePrefix() ? " on" : ""),
+    el("span", "path", prefix.slice(prefix.lastIndexOf("/") + 1)),
+    el("span", "n", String(n)));
+  e.addEventListener("click", () => {
+    const rest = tokens().filter((t) => !isPlaceToken(t));
+    setSearch(prefix === activePrefix() ? rest : [...placeTokens(prefix), ...rest]);
+  });
+  return e;
+}
+
+function sideNav() {
+  const root = el("div", "lvl1 root" + (search.value.trim() === "" ? " on" : ""),
+    el("span", "path", "/"),
+    el("span", "n", String(listedItems.length)));
+  root.title = "show everything";
+  root.addEventListener("click", () => setSearch([]));
+  const side = el("div", "side", root, ...[...prefixCounts(listedItems)].map(([prefix, n]) => sideEntry(prefix, n)));
+  const archived = [...prefixCounts(archivedItems)];
+  if (!archived.length) archived.push([ARCHIVED, 0]);
+  archived.forEach(([prefix, n], k) => side.append(sideEntry(prefix, n, k === 0 ? " archive" : "")));
+  return side;
+}
+
+function page() {
+  const grid = el("div", "three", sideNav(), handle("side", 1), selectable(items), handle("pane", -1), pane());
+  grid.style.setProperty("--side", widths.side + "px");
+  grid.style.setProperty("--pane", widths.pane + "px");
+  return grid;
+}
+
+function updateUrl() {
+  const url = new URL(location);
+  if (search.value) url.searchParams.set("q", search.value);
+  else url.searchParams.delete("q");
+  history.replaceState(null, "", url);
+}
+
+function render() {
+  count.textContent = items.length === 1 ? "1 item" : items.length + " items";
+  view.replaceChildren(page());
+  view.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
+}
+
+function load() {
+  loading = fetchAll();
+  return loading;
+}
+
+async function enterSearch() {
+  let current;
+  do {
+    current = loading;
+    await current;
+  } while (current !== loading);
+  if (!items.length && search.value.trim()) createFromSearch();
+  else search.blur();
+}
+
+async function fetchAll() {
+  if (pending) pending.abort();
+  pending = new AbortController();
+  updateUrl();
+  try {
+    const [itemsRes, listedRes, archivedRes, tagsRes] = await Promise.all([
+      fetch(API + "/items?q=" + encodeURIComponent(search.value), { signal: pending.signal }),
+      fetch(API + "/items", { signal: pending.signal }),
+      fetch(API + "/items?q=is:archived", { signal: pending.signal }),
+      fetch(API + "/tags", { signal: pending.signal }),
+    ]);
+    const json = await itemsRes.json();
+    if (!itemsRes.ok) throw new Error(json.error ? json.error.message : itemsRes.statusText);
+    tagList = (await tagsRes.json()).tags;
+    items = json.items;
+    listedItems = (await listedRes.json()).items;
+    archivedItems = (await archivedRes.json()).items;
+    archivedIds = new Set(archivedItems.map((i) => i.id));
+    byId = new Map([...listedItems, ...archivedItems, ...items].map((i) => [i.id, i]));
+    render();
+  } catch (e) {
+    if (e.name !== "AbortError") errorLine.textContent = e.message;
+  }
+}
+
+search.addEventListener("input", () => {
+  errorLine.textContent = "";
+  load();
+});
+
+search.addEventListener("blur", () => {
+  view.querySelectorAll("mark").forEach((m) => m.replaceWith(m.textContent));
+});
+
+$("clear").addEventListener("click", () => {
+  setSearch([]);
+  search.focus();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (modal.open) return;
+  if (event.target.closest("input, textarea")) {
+    if (event.target === search && event.key === "Escape" && search.value) setSearch([]);
+    else if (event.target === search && event.key === "Enter") enterSearch();
+    else if (event.target === search && event.key === "Escape") search.blur();
+    return;
+  }
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.key === "Escape") {
+    if (search.value) setSearch([]);
+    return;
+  }
+  if (event.key === "/") {
+    event.preventDefault();
+    search.focus();
+  } else if (ui.shown && (event.key === "j" || event.key === "k")) {
+    const index = ui.selectedIndex + (event.key === "j" ? 1 : -1);
+    const item = ui.shown[Math.min(Math.max(index, 0), ui.shown.length - 1)];
+    if (item) {
+      ui.selectedId = item.id;
+      render();
+    }
+  } else if (ui.shown && event.key === "x") {
+    const item = byId.get(ui.selectedId);
+    if (item) setCategory(item, NEXT[category(item.status)]);
+  }
+});
+
+async function start() {
+  try {
+    statuses = (await send("GET", "/statuses")).statuses;
+  } catch (e) {
+    errorLine.textContent = e.message;
+    return;
+  }
+  search.value = new URL(location).searchParams.get("q") ?? "";
+  await load();
+}
+
+start();
+</script>
+</body>
+</html>
