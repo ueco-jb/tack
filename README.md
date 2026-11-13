@@ -22,7 +22,7 @@ todo  /work/boring_job/fix_login
 
 ## Install
 
-Linux, x86_64 and aarch64
+Linux, x86_64, aarch64 and armv6
 
 **Server** `tackd` systemd service on port 15470:
 

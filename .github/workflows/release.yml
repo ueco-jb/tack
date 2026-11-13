@@ -14,16 +14,31 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x86_64
+            target: x86_64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
             arch: aarch64
+            target: aarch64-unknown-linux-musl
+          - runner: ubuntu-24.04
+            arch: armv6
+            target: arm-unknown-linux-musleabihf
+            zig: true
     runs-on: ${{ matrix.runner }}
     env:
-      TARGET: ${{ matrix.arch }}-unknown-linux-musl
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - if: ${{ !matrix.zig }}
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - if: ${{ matrix.zig }}
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - if: ${{ matrix.zig }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
       - run: rustup toolchain install stable --profile minimal --target "$TARGET" && rustup default stable
-      - run: cargo build --release --locked --target "$TARGET" -p tack -p tackd
+      - run: cargo ${{ matrix.zig && 'zigbuild' || 'build' }} --release --locked --target "$TARGET" -p tack -p tackd
       - run: |
           mkdir dist
           for bin in tack tackd; do
