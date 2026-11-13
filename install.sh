@@ -31,8 +31,6 @@ fetch() {
 }
 
 mkdir -p "$bin"
-fetch tack
-
 if $server; then
     fetch tackd
     units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -55,6 +53,8 @@ EOF
     if ! loginctl enable-linger "$(id -un)" 2>/dev/null; then
         echo "to start tackd at boot without logging in, run: sudo loginctl enable-linger $(id -un)"
     fi
+else
+    fetch tack
 fi
 
 case ":$PATH:" in
