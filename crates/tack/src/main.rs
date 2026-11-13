@@ -1,27 +1,36 @@
 use std::collections::HashMap;
-use std::io::IsTerminal;
+use std::io::{BufRead, IsTerminal, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use jiff::Timestamp;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
-use tack::{Client, DEFAULT_URL, item_path};
-use tack_core::Result;
-use tack_core::api::{CreateItem, Deleted, ItemList, ItemView, PatchItem, StatusList};
+use tack::{Client, item_path};
+use tack_core::api::{CreateItem, Deleted, Health, ItemList, ItemView, PatchItem, StatusList};
 use tack_core::model::Category;
+use tack_core::{Error, Result};
+
+const DEFAULT_SERVER: &str = "http://localhost:15470";
 
 #[derive(Parser)]
 #[command(version, about = "Command line client for tackd")]
 struct Cli {
-    #[arg(long, env = "TACK_URL", default_value = DEFAULT_URL, global = true)]
-    url: String,
+    #[arg(
+        long,
+        global = true,
+        help = "Server for this call only, instead of the saved one"
+    )]
+    url: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Show the saved server, or check and save a new one")]
+    Server { url: Option<String> },
     #[command(about = "List items matching a query; no query lists everything not archived")]
     Ls { query: Vec<String> },
     #[command(about = "Show one item with its body")]
@@ -89,7 +98,7 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(&Client::new(&cli.url), cli.command) {
+    match run(cli.url, cli.command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("tack: {}", e.message);
@@ -98,9 +107,84 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(client: &Client, command: Command) -> Result<()> {
+fn config_file() -> Result<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .map(|dir| dir.join("tack").join("server"))
+        .ok_or_else(|| Error::internal("neither XDG_CONFIG_HOME nor HOME is set"))
+}
+
+fn server(flag: Option<String>) -> Result<String> {
+    if let Some(url) = flag {
+        return Ok(normalize(&url));
+    }
+    let saved = std::fs::read_to_string(config_file()?).unwrap_or_default();
+    if !saved.trim().is_empty() {
+        return Ok(saved.trim().to_owned());
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(Error::invalid("no server set, run tack once in a terminal"));
+    }
+    eprint!("tack server [{DEFAULT_SERVER}]: ");
+    std::io::stderr().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .map_err(|e| Error::internal(format!("cannot read the answer: {e}")))?;
+    let answer = answer.trim();
+    save_server(if answer.is_empty() {
+        DEFAULT_SERVER
+    } else {
+        answer
+    })
+}
+
+fn save_server(url: &str) -> Result<String> {
+    let url = normalize(url);
+    let _: Health = Client::new(&url).get("/health", &[])?;
+    let file = config_file()?;
+    let written = file
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&file, format!("{url}\n")));
+    written.map_err(|e| Error::internal(format!("cannot write {}: {e}", file.display())))?;
+    Ok(url)
+}
+
+fn normalize(url: &str) -> String {
+    let url = url.trim().trim_end_matches('/');
+    let url = if url.contains("://") {
+        url.to_owned()
+    } else {
+        format!("http://{url}")
+    };
+    let host = url.split_once("://").map_or("", |(_, rest)| rest);
+    if host.contains(':') {
+        url
+    } else {
+        format!("{url}:15470")
+    }
+}
+
+fn run(flag: Option<String>, command: Command) -> Result<()> {
+    let url = match command {
+        Command::Server { url: Some(url) } => {
+            println!("{}", save_server(&url)?);
+            return Ok(());
+        }
+        Command::Server { url: None } => {
+            println!("{}", server(flag)?);
+            return Ok(());
+        }
+        _ => server(flag)?,
+    };
+    let client = &Client::new(&url);
     let style = || Style::new(client);
     match command {
+        Command::Server { .. } => {}
         Command::Ls { query } => {
             let list: ItemList = client.get("/items", &[("q", &query.join(" "))])?;
             print!("{}", style()?.lines(&list.items));

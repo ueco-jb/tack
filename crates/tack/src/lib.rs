@@ -7,8 +7,6 @@ use tack_core::{Error, Result};
 use ureq::http::Response;
 use ureq::{Agent, Body};
 
-pub const DEFAULT_URL: &str = "http://localhost:15470";
-
 pub struct Client {
     agent: Agent,
     base: String,
