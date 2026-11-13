@@ -80,10 +80,10 @@ tack server [http://localhost:15470]: myhost
 
 | Query | Matches |
 |---|---|
-| `milestone` | paths containing the word |
+| `project-x` | paths containing the word |
 | `/coding/project-x/` | that item and everything under it |
 | `/coding/project-x` | paths starting with it |
-| `-release` | paths without the word |
+| `-boring_job` | paths without the word |
 | `+bug`, `tag:bug` | items tagged `bug` |
 | `todo`, `doing`, `done` | items with that status |
 | `is:open`, `is:done` | open or done items |
