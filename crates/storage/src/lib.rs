@@ -267,45 +267,6 @@ impl Storage {
         tx.commit().map_err(db)
     }
 
-    pub fn insert_status(&mut self, status: &Status) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO status (id, name, label, category, position) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    status.id.0,
-                    status.name,
-                    status.label,
-                    status.category.as_str(),
-                    status.position
-                ],
-            )
-            .map_err(db)?;
-        Ok(())
-    }
-
-    pub fn update_status(&mut self, status: &Status) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE status SET name = ?2, label = ?3, category = ?4, position = ?5 WHERE id = ?1",
-                params![
-                    status.id.0,
-                    status.name,
-                    status.label,
-                    status.category.as_str(),
-                    status.position
-                ],
-            )
-            .map_err(db)?;
-        Ok(())
-    }
-
-    pub fn delete_status(&mut self, id: StatusId) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM status WHERE id = ?1", [id.0])
-            .map_err(db)?;
-        Ok(())
-    }
-
     pub fn set_tag_color(&mut self, tag: &Tag) -> Result<()> {
         self.conn
             .execute(

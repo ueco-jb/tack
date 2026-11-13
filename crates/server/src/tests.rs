@@ -189,6 +189,21 @@ async fn foreign_hosts_and_origins_are_forbidden() {
             LAPTOP,
             Method::POST,
             "/items",
+            Some(add.clone()),
+            &[(header::ORIGIN, "http://203.0.113.5")],
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an IP origin is still foreign"
+    );
+
+    let (status, _) = h
+        .send_from(
+            LAPTOP,
+            Method::POST,
+            "/items",
             Some(add),
             &[(header::ORIGIN, "http://pi:15470")],
         )
@@ -335,43 +350,6 @@ async fn archive_hides_and_tags_keep_colors() {
 
     let loaded = h.server.storage().load().unwrap();
     assert_eq!(*h.server.tree(), loaded);
-}
-
-#[tokio::test]
-async fn statuses_add_update_remove() {
-    let h = Harness::new();
-    let (status, created) = h
-        .send(
-            Method::POST,
-            "/statuses",
-            Some(json!({"name": "blocked", "category": "active"})),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(created["name"], "blocked");
-
-    let (status, updated) = h
-        .send(
-            Method::PATCH,
-            "/statuses/blocked",
-            Some(json!({"label": "Blocked"})),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(updated["label"], "Blocked");
-
-    h.send(
-        Method::POST,
-        "/items",
-        Some(json!({"path": "home", "status": "blocked"})),
-    )
-    .await;
-    let (status, body) = h.send(Method::DELETE, "/statuses/blocked", None).await;
-    assert_eq!((status, kind(&body)), (StatusCode::CONFLICT, "conflict"));
-
-    h.send(Method::DELETE, "/items/home", None).await;
-    let (status, _) = h.send(Method::DELETE, "/statuses/blocked", None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

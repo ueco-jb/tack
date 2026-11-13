@@ -15,7 +15,7 @@ done
 case $(uname -m) in
     x86_64 | amd64) arch=x86_64 ;;
     aarch64 | arm64) arch=aarch64 ;;
-    armv6l) arch=armv6 ;;
+    armv6l | armv7l) arch=armv6 ;;
     *) echo "install.sh: no release for $(uname -m)" >&2; exit 1 ;;
 esac
 

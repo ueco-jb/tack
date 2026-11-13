@@ -189,12 +189,12 @@ const ARCHIVED = "/archived";
 let items = [];
 let listedItems = [];
 let archivedItems = [];
-let archivedIds = new Set();
 let statuses = [];
 let tagList = [];
 let byId = new Map();
 let pending = null;
 let loading = Promise.resolve();
+const drafts = new Map();
 const ui = {
   selectedId: null,
   selectedIndex: 0,
@@ -337,8 +337,9 @@ function draftFromSearch() {
   }
   const known = new Set([...listedItems, ...archivedItems].map((x) => x.path));
   const [first, ...more] = plain;
-  draft.path = first?.startsWith("/") && more.length && known.has(first.toLowerCase())
-    ? first + "/" + more.join(" ")
+  const base = first?.replace(/\/$/, "");
+  draft.path = base?.startsWith("/") && more.length && known.has(base.toLowerCase())
+    ? base + "/" + more.join(" ")
     : plain.join(" ");
   return draft;
 }
@@ -353,7 +354,8 @@ async function createFromSearch() {
     const created = await send("POST", "/items", body);
     ui.selectedId = created.id;
     search.blur();
-    setSearch([parentPath(created.path)].filter(Boolean));
+    const parent = parentPath(created.path);
+    setSearch(parent ? [parent + "/"] : []);
   } catch (e) {
     errorLine.textContent = e.message;
   }
@@ -380,6 +382,9 @@ function highlight(text) {
 async function patchItem(item, data) {
   try {
     await send("PATCH", "/items/" + item.id, data);
+    const title = drafts.get(item.id + ":title");
+    if ("path" in data && title !== undefined && data.path === parentPath(item.path) + "/" + title.trim()) drafts.delete(item.id + ":title");
+    if ("body" in data && drafts.get(item.id + ":body") === data.body) drafts.delete(item.id + ":body");
     errorLine.textContent = "";
   } catch (e) {
     if (e.kind === "conflict" && data.status && category(data.status) === "done" && !data.force
@@ -457,14 +462,19 @@ async function tagRequest(method, tag, data) {
   await load();
 }
 
-function addTag(i, tag) {
-  ui.picker.filter = "";
-  return patchItem(i, { tags: [...i.tags, tag] });
+let tagEdits = Promise.resolve();
+
+function editTags(i, change) {
+  tagEdits = tagEdits.then(() => {
+    const current = byId.get(i.id) ?? i;
+    return patchItem(current, { tags: change(current.tags) });
+  });
+  return tagEdits;
 }
 
-function createTag(i, tag) {
+function addTag(i, tag) {
   ui.picker.filter = "";
-  return patchItem(i, { tags: [...i.tags, tag] });
+  return editTags(i, (tags) => (tags.includes(tag) ? tags : [...tags, tag]));
 }
 
 function palette(tag) {
@@ -525,7 +535,7 @@ function picker(i) {
       .flatMap((t) => tagOption(i, t));
     if (f && !tagList.some((t) => t.name === f)) {
       const create = el("li", "", el("span", "dot"), "create “" + f + "”");
-      create.addEventListener("click", () => createTag(i, f));
+      create.addEventListener("click", () => addTag(i, f));
       options.push(create);
     }
     list.replaceChildren(...options);
@@ -538,8 +548,7 @@ function picker(i) {
     } else if (event.key === "Enter") {
       const f = input.value.trim().toLowerCase();
       if (!f || i.tags.includes(f)) return;
-      if (tagList.some((t) => t.name === f)) addTag(i, f);
-      else createTag(i, f);
+      addTag(i, f);
     }
   });
   fill();
@@ -554,7 +563,7 @@ function tagEditor(i) {
     render();
   });
   const chips = i.tags.map((t) => {
-    const c = tagChip(t, () => patchItem(i, { tags: i.tags.filter((x) => x !== t) }));
+    const c = tagChip(t, () => editTags(i, (tags) => tags.filter((x) => x !== t)));
     c.prepend(colorDot(t, () => {
       ui.colorFor = ui.colorFor === t ? null : t;
       render();
@@ -591,7 +600,7 @@ function deleteButton(i) {
 }
 
 function archiveButton(i) {
-  const archived = archivedIds.has(i.id);
+  const archived = i.archived;
   const b = el("button", "btn", archived ? "Unarchive" : "Archive");
   b.addEventListener("click", () => patchItem(i, { archived: !archived }));
   return b;
@@ -650,15 +659,19 @@ function dueEditor(i) {
 }
 
 function titleEditor(i) {
+  const key = i.id + ":title";
   const input = el("input", "title-input");
-  input.value = i.title;
+  input.value = drafts.get(key) ?? i.title;
+  input.dataset.draft = key;
   input.spellcheck = false;
   input.title = "rename";
+  input.addEventListener("input", () => drafts.set(key, input.value));
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
       input.blur();
     } else if (event.key === "Escape") {
+      drafts.delete(key);
       input.value = i.title;
       input.blur();
     }
@@ -666,6 +679,7 @@ function titleEditor(i) {
   input.addEventListener("blur", () => {
     const title = input.value.trim();
     if (!title || title === i.title) {
+      drafts.delete(key);
       input.value = i.title;
       return;
     }
@@ -675,11 +689,15 @@ function titleEditor(i) {
 }
 
 function bodyEditor(i) {
+  const key = i.id + ":body";
   const area = el("textarea", "body");
-  area.value = i.body;
+  area.value = drafts.get(key) ?? i.body;
+  area.dataset.draft = key;
   area.placeholder = "description";
+  area.addEventListener("input", () => drafts.set(key, area.value));
   area.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      drafts.delete(key);
       area.value = i.body;
       area.blur();
     } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -688,6 +706,7 @@ function bodyEditor(i) {
   });
   area.addEventListener("blur", () => {
     if (area.value !== i.body) patchItem(i, { body: area.value });
+    else drafts.delete(key);
   });
   return area;
 }
@@ -709,7 +728,7 @@ function info(i) {
 }
 
 function displayPath(i) {
-  return archivedIds.has(i.id) ? ARCHIVED + i.path : i.path;
+  return i.archived ? ARCHIVED + i.path : i.path;
 }
 
 function selectable(shown) {
@@ -762,26 +781,26 @@ function setSearch(list) {
   load();
 }
 
-function activePrefix() {
+function activePlace() {
   const current = tokens();
-  const path = current.find((t) => t.startsWith("/")) ?? "";
-  return current.includes("is:archived") ? ARCHIVED + path : path;
+  const path = (current.find((t) => t.startsWith("/") && t.endsWith("/")) ?? "/").slice(0, -1);
+  return { archived: current.includes("is:archived"), path };
 }
 
-function placeTokens(prefix) {
-  if (prefix === ARCHIVED || prefix.startsWith(ARCHIVED + "/")) {
-    const path = prefix.slice(ARCHIVED.length);
-    return path ? ["is:archived", path] : ["is:archived"];
-  }
-  return [prefix];
+function placeTokens(archived, path) {
+  const place = path ? [path + "/"] : [];
+  return archived ? ["is:archived", ...place] : place;
 }
 
-function sideEntry(prefix, n, extra = "") {
+function sideEntry(prefix, n, archived, extra = "") {
+  const path = archived ? prefix.slice(ARCHIVED.length) : prefix;
+  const active = activePlace();
+  const on = active.archived === archived && active.path === path;
   const nested = prefix.indexOf("/", 1) > 0;
-  const e = el("div", (nested ? "lvl2" : "lvl1") + extra + (prefix === activePrefix() ? " on" : ""),
+  const e = el("div", (nested ? "lvl2" : "lvl1") + extra + (on ? " on" : ""),
     el("span", "path", prefix.slice(prefix.lastIndexOf("/") + 1)),
     el("span", "n", String(n)));
-  e.addEventListener("click", () => setSearch(prefix === activePrefix() ? [] : placeTokens(prefix)));
+  e.addEventListener("click", () => setSearch(on ? [] : placeTokens(archived, path)));
   return e;
 }
 
@@ -791,10 +810,10 @@ function sideNav() {
     el("span", "n", String(listedItems.length)));
   root.title = "show everything";
   root.addEventListener("click", () => setSearch([]));
-  const side = el("div", "side", root, ...[...prefixCounts(listedItems)].map(([prefix, n]) => sideEntry(prefix, n)));
+  const side = el("div", "side", root, ...[...prefixCounts(listedItems)].map(([prefix, n]) => sideEntry(prefix, n, false)));
   const archived = [...prefixCounts(archivedItems)];
   if (!archived.length) archived.push([ARCHIVED, 0]);
-  archived.forEach(([prefix, n], k) => side.append(sideEntry(prefix, n, k === 0 ? " archive" : "")));
+  archived.forEach(([prefix, n], k) => side.append(sideEntry(prefix, n, true, k === 0 ? " archive" : "")));
   return side;
 }
 
@@ -814,8 +833,16 @@ function updateUrl() {
 
 function render() {
   count.textContent = items.length === 1 ? "1 item" : items.length + " items";
+  const focused = document.activeElement;
+  const key = focused?.dataset?.draft;
+  const range = key ? [focused.selectionStart, focused.selectionEnd] : null;
   view.replaceChildren(page());
   view.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
+  const editor = key && view.querySelector(`[data-draft="${key}"]`);
+  if (editor) {
+    editor.focus();
+    editor.setSelectionRange(...range);
+  }
 }
 
 function load() {
@@ -838,20 +865,19 @@ async function fetchAll() {
   pending = new AbortController();
   updateUrl();
   try {
-    const [itemsRes, listedRes, archivedRes, tagsRes] = await Promise.all([
+    const [itemsRes, allRes, tagsRes] = await Promise.all([
       fetch(API + "/items?q=" + encodeURIComponent(search.value), { signal: pending.signal }),
-      fetch(API + "/items", { signal: pending.signal }),
-      fetch(API + "/items?q=is:archived", { signal: pending.signal }),
+      fetch(API + "/items?q=is:all", { signal: pending.signal }),
       fetch(API + "/tags", { signal: pending.signal }),
     ]);
     const json = await itemsRes.json();
     if (!itemsRes.ok) throw new Error(json.error ? json.error.message : itemsRes.statusText);
     tagList = (await tagsRes.json()).tags;
     items = json.items;
-    listedItems = (await listedRes.json()).items;
-    archivedItems = (await archivedRes.json()).items;
-    archivedIds = new Set(archivedItems.map((i) => i.id));
-    byId = new Map([...listedItems, ...archivedItems, ...items].map((i) => [i.id, i]));
+    const all = (await allRes.json()).items;
+    listedItems = all.filter((i) => !i.archived);
+    archivedItems = all.filter((i) => i.archived);
+    byId = new Map([...all, ...items].map((i) => [i.id, i]));
     render();
   } catch (e) {
     if (e.name !== "AbortError") errorLine.textContent = e.message;

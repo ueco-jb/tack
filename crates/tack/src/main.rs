@@ -122,7 +122,7 @@ fn server(flag: Option<String>) -> Result<String> {
     }
     let saved = std::fs::read_to_string(config_file()?).unwrap_or_default();
     if !saved.trim().is_empty() {
-        return Ok(saved.trim().to_owned());
+        return Ok(normalize(&saved));
     }
     if !std::io::stdin().is_terminal() {
         return Err(Error::invalid("no server set, run tack once in a terminal"));
@@ -156,17 +156,19 @@ fn save_server(url: &str) -> Result<String> {
 
 fn normalize(url: &str) -> String {
     let url = url.trim().trim_end_matches('/');
-    let url = if url.contains("://") {
-        url.to_owned()
-    } else {
-        format!("http://{url}")
+    let (scheme, rest) = url.split_once("://").unwrap_or(("http", url));
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let has_port = match authority.rsplit_once(']') {
+        Some((_, after)) => after.starts_with(':'),
+        None => authority.contains(':'),
     };
-    let host = url.split_once("://").map_or("", |(_, rest)| rest);
-    if host.contains(':') {
-        url
+    let port = if has_port { "" } else { ":15470" };
+    let path = if path.is_empty() {
+        String::new()
     } else {
-        format!("{url}:15470")
-    }
+        format!("/{path}")
+    };
+    format!("{scheme}://{authority}{port}{path}")
 }
 
 fn run(flag: Option<String>, command: Command) -> Result<()> {
@@ -187,11 +189,11 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
         Command::Server { .. } => {}
         Command::Ls { query } => {
             let list: ItemList = client.get("/items", &[("q", &query.join(" "))])?;
-            print!("{}", style()?.lines(&list.items));
+            print!("{}", style().lines(&list.items));
         }
         Command::Show { item } => {
             let item: ItemView = client.get(&item_path(&item.join(" ")), &[])?;
-            print!("{}", style()?.detail(&item));
+            print!("{}", style().detail(&item));
         }
         Command::Add {
             path,
@@ -208,7 +210,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
                 due,
             };
             let item: ItemView = client.post("/items", &req)?;
-            print!("{}", style()?.lines(&[item]));
+            print!("{}", style().lines(&[item]));
         }
         Command::Done { item, force } => {
             let patch = PatchItem {
@@ -217,7 +219,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
                 ..PatchItem::default()
             };
             let item: ItemView = client.patch(&item_path(&item.join(" ")), &patch)?;
-            print!("{}", style()?.lines(&[item]));
+            print!("{}", style().lines(&[item]));
         }
         Command::Mv { item, path } => {
             let patch = PatchItem {
@@ -225,7 +227,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
                 ..PatchItem::default()
             };
             let item: ItemView = client.patch(&item_path(&item), &patch)?;
-            print!("{}", style()?.lines(&[item]));
+            print!("{}", style().lines(&[item]));
         }
         Command::Set {
             item,
@@ -259,7 +261,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
                 ));
             }
             let item: ItemView = client.patch(&item_path(&item.join(" ")), &patch)?;
-            print!("{}", style()?.lines(&[item]));
+            print!("{}", style().lines(&[item]));
         }
         Command::Rm { item, recursive } => {
             let recursive = if recursive { "true" } else { "false" };
@@ -275,21 +277,19 @@ struct Style {
 }
 
 impl Style {
-    fn new(client: &Client) -> Result<Style> {
+    fn new(client: &Client) -> Style {
         let color = std::io::stdout().is_terminal()
             && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
-        let categories = if color {
-            let list: StatusList = client.get("/statuses", &[])?;
-            Some(
+        let categories = color
+            .then(|| client.get::<StatusList>("/statuses", &[]).ok())
+            .flatten()
+            .map(|list| {
                 list.statuses
                     .into_iter()
                     .map(|s| (s.name, s.category))
-                    .collect(),
-            )
-        } else {
-            None
-        };
-        Ok(Style { categories })
+                    .collect()
+            });
+        Style { categories }
     }
 
     fn status(&self, name: &str, width: usize) -> String {
@@ -339,8 +339,11 @@ impl Style {
         }
         field("created", local(item.created_at));
         field("updated", local(item.updated_at));
-        if let Some(at) = item.archived_at {
-            field("archived", local(at));
+        if item.archived {
+            let at = item
+                .archived_at
+                .map_or_else(|| "by a parent".to_owned(), local);
+            field("archived", at);
         }
         if !item.body.is_empty() {
             out.push('\n');
@@ -367,7 +370,7 @@ fn extras(item: &ItemView) -> String {
     if let Some(due) = item.due {
         parts.push(due.to_string());
     }
-    if item.archived_at.is_some() {
+    if item.archived {
         parts.push("archived".to_owned());
     }
     parts.join("  ")

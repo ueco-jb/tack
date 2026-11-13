@@ -42,9 +42,25 @@ pub async fn endpoint(
             );
         }
     };
+    if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return error(
+            StatusCode::BAD_REQUEST,
+            message.get("id").cloned(),
+            INVALID_REQUEST,
+            "jsonrpc must be \"2.0\"".into(),
+        );
+    }
     let Some(id) = message.get("id").cloned() else {
         return StatusCode::ACCEPTED.into_response();
     };
+    if !(id.is_string() || id.is_i64() || id.is_u64()) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            None,
+            INVALID_REQUEST,
+            "id must be a string or an integer".into(),
+        );
+    }
     let version = headers
         .get("mcp-protocol-version")
         .map(|v| v.to_str().unwrap_or_default());
@@ -107,14 +123,12 @@ struct CallParams {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SearchArgs {
     #[serde(default)]
     query: String,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ItemArgs {
     item: Target,
 }
@@ -127,7 +141,6 @@ struct UpdateArgs {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DeleteArgs {
     item: Target,
     #[serde(default)]
@@ -249,7 +262,7 @@ fn summary(item: tack_core::api::ItemView) -> Value {
         "tags": item.tags,
         "due": item.due,
         "done": item.done_at.is_some(),
-        "archived": item.archived_at.is_some(),
+        "archived": item.archived,
     })
 }
 
@@ -261,7 +274,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "search",
-            "description": "List items matching a query. Words match the path; /a/b matches a subtree; -word excludes; +tag; todo, doing, done filter status; is:archived, is:all. Empty query: everything not archived.",
+            "description": "List items matching a query. Words match the path; /a/b/ matches that item and its subtree, /a/b any path starting with it; -word excludes; +tag; todo, doing, done filter status; is:archived, is:all. Empty query: everything not archived.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

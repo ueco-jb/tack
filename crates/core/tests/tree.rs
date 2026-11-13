@@ -1,23 +1,23 @@
 use jiff::Timestamp;
 use tack_core::ErrorKind;
-use tack_core::api::{CreateItem, CreateStatus, PatchItem, PatchStatus};
+use tack_core::api::{CreateItem, PatchItem};
 use tack_core::model::{Category, ItemId, Status, StatusId, TAG_COLORS};
 use tack_core::path::Target;
 use tack_core::query::Query;
 use tack_core::tree::{Tree, Written};
 
 fn seed_statuses() -> Vec<Status> {
-    let status = |id, name: &str, category, position| Status {
+    let status = |id, name: &str, label: &str, category, position| Status {
         id: StatusId(id),
         name: name.into(),
-        label: name.into(),
+        label: label.into(),
         category,
         position,
     };
     vec![
-        status(1, "todo", Category::Todo, 1),
-        status(2, "doing", Category::Active, 2),
-        status(3, "done", Category::Done, 3),
+        status(1, "todo", "To do", Category::Todo, 1),
+        status(2, "doing", "Doing", Category::Active, 2),
+        status(3, "done", "Done", Category::Done, 3),
     ]
 }
 
@@ -390,6 +390,43 @@ fn done_with_open_children_needs_force_and_archive_hides_the_subtree() {
 }
 
 #[test]
+fn renaming_inside_an_archived_subtree_keeps_it_archived() {
+    let mut h = Harness::new();
+    h.add("home/weekly");
+    h.archive("home", true).unwrap();
+    h.try_patch(
+        "home/weekly",
+        PatchItem {
+            path: Some("home/daily".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(h.paths("is:archived"), ["/home", "/home/daily"]);
+    let daily = h.id("home/daily");
+    assert!(h.tree.view(daily).unwrap().archived, "inherited from /home");
+    h.assert_matches_rebuild();
+}
+
+#[test]
+fn a_suffix_on_a_maximum_length_title_stays_within_the_limit() {
+    let mut h = Harness::new();
+    let title = "a".repeat(tack_core::path::MAX_TITLE_CHARS);
+    h.add(&title);
+    let second = h.add(&title);
+    let path = h.tree.view(second).unwrap().path;
+    assert!(path.ends_with("-2"));
+    assert_eq!(
+        h.tree
+            .find(&path.parse::<Target>().unwrap())
+            .unwrap()
+            .item
+            .id,
+        second
+    );
+}
+
+#[test]
 fn unarchiving_a_child_unarchives_its_whole_chain() {
     let mut h = Harness::new();
     h.add("home/weekly/clean");
@@ -637,20 +674,26 @@ fn list_words_operators_and_subtrees() {
 }
 
 #[test]
+fn a_trailing_slash_limits_a_path_query_to_that_subtree() {
+    let mut h = Harness::new();
+    h.add("work/report");
+    h.add("workshop/bench");
+    assert_eq!(
+        h.paths("/work"),
+        ["/work", "/work/report", "/workshop", "/workshop/bench"]
+    );
+    assert_eq!(h.paths("/work/"), ["/work", "/work/report"]);
+    assert_eq!(h.paths("-/work/"), ["/workshop", "/workshop/bench"]);
+}
+
+#[test]
 fn typed_status_names_and_labels_filter_by_status() {
     let mut h = Harness::new();
     h.add("home/laundry");
     h.add("home/dishes");
     h.add("work/todo app");
     h.set_status("home/dishes", "doing").unwrap();
-    h.tree
-        .add_status(&CreateStatus {
-            name: "review".into(),
-            category: Category::Active,
-            label: Some("In review".into()),
-        })
-        .unwrap();
-    h.set_status("work/todo app", "review").unwrap();
+    h.set_status("work/todo app", "done").unwrap();
 
     assert_eq!(h.paths("doing"), ["/home/dishes"]);
     assert_eq!(h.paths("todo home"), ["/home", "/home/laundry"]);
@@ -658,7 +701,11 @@ fn typed_status_names_and_labels_filter_by_status() {
         h.paths("todo doing /home"),
         ["/home", "/home/dishes", "/home/laundry"]
     );
-    assert_eq!(h.paths("In Review"), ["/work/todo_app"]);
+    assert_eq!(
+        h.paths("To Do home"),
+        ["/home", "/home/laundry"],
+        "a label of two words matches as typed"
+    );
     assert_eq!(
         h.paths("todo_app"),
         ["/work/todo_app"],
@@ -671,42 +718,6 @@ fn list_reports_unknown_status() {
     let h = Harness::new();
     let unknown = h.tree.list(&Query::parse("status:blocked").unwrap());
     assert_eq!(unknown.unwrap_err().kind, ErrorKind::Invalid);
-}
-
-#[test]
-fn statuses_in_use_or_last_of_category_are_protected() {
-    let mut h = Harness::new();
-    h.add("home");
-    h.tree
-        .add_status(&CreateStatus {
-            name: "Blocked".into(),
-            category: Category::Active,
-            label: None,
-        })
-        .unwrap();
-    assert_eq!(h.tree.status_by_name("blocked").unwrap().position, 4);
-
-    assert_eq!(
-        h.tree.remove_status("todo").unwrap_err().kind,
-        ErrorKind::Conflict,
-        "in use"
-    );
-    assert_eq!(
-        h.tree.remove_status("done").unwrap_err().kind,
-        ErrorKind::Conflict,
-        "last done status"
-    );
-    let recategorize = h.tree.update_status(
-        "todo",
-        &PatchStatus {
-            category: Some(Category::Active),
-            ..Default::default()
-        },
-    );
-    assert_eq!(recategorize.unwrap_err().kind, ErrorKind::Conflict);
-
-    h.tree.remove_status("blocked").unwrap();
-    assert!(h.tree.status_by_name("blocked").is_err());
 }
 
 #[test]
@@ -798,4 +809,23 @@ fn incremental_updates_match_a_full_rebuild() {
     }
     assert!(h.tree.len() > 20, "the sequence should build a real tree");
     h.assert_matches_rebuild();
+}
+
+#[test]
+fn done_needs_force_while_anything_under_it_is_open() {
+    let mut h = Harness::new();
+    h.add("project/milestone/task");
+    h.try_patch(
+        "project/milestone",
+        PatchItem {
+            status: Some("done".into()),
+            force: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let err = h.set_status("project", "done").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Conflict, "task is still open");
+    h.set_status("project/milestone/task", "done").unwrap();
+    h.set_status("project", "done").unwrap();
 }

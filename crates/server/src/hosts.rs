@@ -40,15 +40,6 @@ impl AllowedHosts {
         let host = host.strip_suffix('.').unwrap_or(&host);
         host.parse::<IpAddr>().is_ok() || self.names.iter().any(|n| n == host)
     }
-
-    pub fn allows_origin(&self, origin: &str) -> bool {
-        match origin.trim().split_once("://") {
-            Some(("http" | "https", authority)) if !authority.contains('/') => {
-                self.allows_host(authority)
-            }
-            _ => false,
-        }
-    }
 }
 
 fn strip_port(host: &str) -> &str {
@@ -96,11 +87,20 @@ fn check_headers(server: &Server, req: &Request) -> Result<()> {
     let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     if !safe
         && let Some(origin) = headers.get(header::ORIGIN)
-        && !origin.to_str().is_ok_and(|o| server.hosts.allows_origin(o))
+        && !origin
+            .to_str()
+            .is_ok_and(|o| host.is_some_and(|h| same_origin(o, h)))
     {
         return Err(Error::forbidden("cross origin request rejected"));
     }
     Ok(())
+}
+
+fn same_origin(origin: &str, host: &str) -> bool {
+    match origin.trim().split_once("://") {
+        Some(("http" | "https", authority)) => authority.eq_ignore_ascii_case(host.trim()),
+        _ => false,
+    }
 }
 
 pub fn client_ip(req: &Request) -> Result<IpAddr> {
@@ -153,13 +153,14 @@ mod tests {
     }
 
     #[test]
-    fn origins() {
-        let h = hosts();
-        assert!(h.allows_origin("http://pi:15470"));
-        assert!(h.allows_origin("http://192.168.1.5:15470"));
-        assert!(!h.allows_origin("https://evil.example"));
-        assert!(!h.allows_origin("null"));
-        assert!(!h.allows_origin("file://"));
-        assert!(!h.allows_origin("http://pi:15470/path"));
+    fn origin_must_match_the_requested_host() {
+        assert!(same_origin("http://pi:15470", "pi:15470"));
+        assert!(same_origin("http://PI:15470", "pi:15470"));
+        assert!(same_origin("http://192.168.1.5:15470", "192.168.1.5:15470"));
+        assert!(!same_origin("http://203.0.113.5", "192.168.1.5:15470"));
+        assert!(!same_origin("https://evil.example", "pi:15470"));
+        assert!(!same_origin("null", "pi:15470"));
+        assert!(!same_origin("file://", "pi:15470"));
+        assert!(!same_origin("http://pi:15470/path", "pi:15470"));
     }
 }

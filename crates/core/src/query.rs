@@ -161,10 +161,12 @@ impl Tree {
 }
 
 fn matches_word(path: &str, word: &str) -> bool {
-    if word.starts_with('/') {
-        path.starts_with(word)
-    } else {
-        path.contains(word)
+    match word.strip_suffix('/') {
+        Some(exact) if word.starts_with('/') => path
+            .strip_prefix(exact)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/')),
+        _ if word.starts_with('/') => path.starts_with(word),
+        _ => path.contains(word),
     }
 }
 

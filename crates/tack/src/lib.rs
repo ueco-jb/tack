@@ -63,6 +63,8 @@ impl Client {
         if status.is_success() {
             return response
                 .body_mut()
+                .with_config()
+                .limit(u64::MAX)
                 .read_json()
                 .map_err(|e| Error::internal(format!("unreadable response: {e}")));
         }
@@ -75,12 +77,24 @@ impl Client {
 
 pub fn item_path(item: &str) -> String {
     let mut out = String::from("/items/");
-    for byte in item.trim().trim_start_matches('/').bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+    for (i, byte) in item.trim().bytes().enumerate() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) || (byte == b'/' && i > 0) {
             out.push(char::from(byte));
         } else {
             out.push_str(&format!("%{byte:02X}"));
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::item_path;
+
+    #[test]
+    fn a_leading_slash_keeps_numeric_paths_apart_from_ids() {
+        assert_eq!(item_path("/2026"), "/items/%2F2026");
+        assert_eq!(item_path("2026"), "/items/2026");
+        assert_eq!(item_path("work/fix login"), "/items/work/fix%20login");
+    }
 }

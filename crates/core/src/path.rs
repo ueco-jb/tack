@@ -2,7 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer};
 
 use crate::model::ItemId;
 use crate::{Error, Result};
@@ -74,10 +74,6 @@ impl ItemPath {
     pub fn title(&self) -> &str {
         self.0.last().expect("parse rejects empty paths")
     }
-
-    pub fn parent(&self) -> Option<ItemPath> {
-        (self.0.len() > 1).then(|| ItemPath(self.0[..self.0.len() - 1].to_vec()))
-    }
 }
 
 impl fmt::Display for ItemPath {
@@ -116,15 +112,6 @@ impl fmt::Display for Target {
         match self {
             Target::Id(id) => id.fmt(f),
             Target::Path(path) => path.fmt(f),
-        }
-    }
-}
-
-impl Serialize for Target {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Target::Id(id) => serializer.serialize_i64(id.0),
-            Target::Path(_) => serializer.serialize_str(&self.to_string()),
         }
     }
 }
@@ -223,6 +210,6 @@ mod tests {
         let string_id: Target = serde_json::from_str("\"7\"").unwrap();
         assert_eq!(id, Target::Id(ItemId(7)));
         assert_eq!(string_id, Target::Id(ItemId(7)));
-        assert_eq!(serde_json::to_string(&path).unwrap(), "\"/home/weekly\"");
+        assert_eq!(path.to_string(), "/home/weekly");
     }
 }

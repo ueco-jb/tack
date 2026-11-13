@@ -2,15 +2,13 @@ use std::collections::{BTreeMap, HashMap};
 
 use jiff::Timestamp;
 
-use crate::api::{CreateItem, CreateStatus, ItemView, PatchItem, PatchStatus};
+use crate::api::{CreateItem, ItemView, PatchItem};
 use crate::model::{
     Category, Item, ItemId, Status, StatusId, Tag, default_tag_color, normalize_color,
-    normalize_status_name, normalize_tag, normalize_tags, transition,
+    normalize_tag, normalize_tags, transition,
 };
-use crate::path::{ItemPath, Target, name_of};
+use crate::path::{ItemPath, MAX_TITLE_CHARS, Target, name_of};
 use crate::{Error, Result};
-
-pub const MAX_LABEL_CHARS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Written {
@@ -24,7 +22,6 @@ pub struct Node {
     pub name: Box<str>,
     pub children: Vec<ItemId>,
     pub path: Box<str>,
-    pub depth: u32,
     pub archived: bool,
 }
 
@@ -254,6 +251,7 @@ impl Tree {
             started_at: item.started_at,
             done_at: item.done_at,
             archived_at: item.archived_at,
+            archived: node.archived,
         })
     }
 
@@ -364,7 +362,8 @@ impl Tree {
         }
 
         let default_status = self.first_status(Category::Todo)?.id;
-        let mut updated = if patch.path.is_some() || unarchive {
+        let moved = existing_parent != old.parent || !missing_parents.is_empty();
+        let mut updated = if moved || unarchive {
             self.unarchive_ancestors(existing_parent, now)
         } else {
             Vec::new()
@@ -423,77 +422,6 @@ impl Tree {
         Ok(removed)
     }
 
-    pub fn add_status(&mut self, req: &CreateStatus) -> Result<StatusId> {
-        let name = normalize_status_name(&req.name)?;
-        if self.statuses.iter().any(|s| s.name == name) {
-            return Err(Error::conflict(format!("status {name} already exists")));
-        }
-        let label = normalize_label(req.label.as_deref().unwrap_or(&name))?;
-        let id = StatusId(self.statuses.iter().map(|s| s.id.0).max().unwrap_or(0) + 1);
-        let position = self.statuses.iter().map(|s| s.position).max().unwrap_or(0) + 1;
-        self.statuses.push(Status {
-            id,
-            name,
-            label,
-            category: req.category,
-            position,
-        });
-        Ok(id)
-    }
-
-    pub fn update_status(&mut self, name: &str, patch: &PatchStatus) -> Result<StatusId> {
-        let old = self.status_by_name(name)?;
-        let mut new = old.clone();
-        if let Some(raw) = &patch.name {
-            let renamed = normalize_status_name(raw)?;
-            if renamed != old.name && self.statuses.iter().any(|s| s.name == renamed) {
-                return Err(Error::conflict(format!("status {renamed} already exists")));
-            }
-            new.name = renamed;
-        }
-        if let Some(label) = &patch.label {
-            new.label = normalize_label(label)?;
-        }
-        if let Some(category) = patch.category
-            && category != old.category
-        {
-            if self.status_in_use(old.id) {
-                return Err(Error::conflict(format!(
-                    "status {} is in use; move its items to another status before changing its category",
-                    old.name
-                )));
-            }
-            self.ensure_not_last_of_category(old)?;
-            new.category = category;
-        }
-        if let Some(position) = patch.position {
-            new.position = position;
-        }
-        let id = new.id;
-        let slot = self
-            .statuses
-            .iter_mut()
-            .find(|s| s.id == id)
-            .expect("found by name above");
-        *slot = new;
-        self.statuses.sort_by_key(|s| (s.position, s.id));
-        Ok(id)
-    }
-
-    pub fn remove_status(&mut self, name: &str) -> Result<StatusId> {
-        let status = self.status_by_name(name)?;
-        if self.status_in_use(status.id) {
-            return Err(Error::conflict(format!(
-                "status {} is in use; move its items to another status first",
-                status.name
-            )));
-        }
-        self.ensure_not_last_of_category(status)?;
-        let id = status.id;
-        self.statuses.retain(|s| s.id != id);
-        Ok(id)
-    }
-
     fn existing_prefix(&self, segments: &[String]) -> (Option<ItemId>, usize) {
         let mut cursor = None;
         let mut found = 0;
@@ -535,7 +463,11 @@ impl Tree {
             return title.to_owned();
         }
         (2..)
-            .map(|n| format!("{title}-{n}"))
+            .map(|n| {
+                let suffix = format!("-{n}");
+                let keep = MAX_TITLE_CHARS - suffix.chars().count();
+                format!("{}{suffix}", title.chars().take(keep).collect::<String>())
+            })
             .find(|t| !taken(t))
             .expect("some suffix is free")
     }
@@ -637,29 +569,18 @@ impl Tree {
     }
 
     fn has_open_children(&self, id: ItemId) -> bool {
-        self.nodes[&id].children.iter().any(|c| {
-            let child = &self.nodes[c].item;
-            child.done_at.is_none() && child.archived_at.is_none()
-        })
-    }
-
-    fn status_in_use(&self, id: StatusId) -> bool {
-        self.nodes.values().any(|n| n.item.status == id)
-    }
-
-    fn ensure_not_last_of_category(&self, status: &Status) -> Result<()> {
-        let count = self
-            .statuses
-            .iter()
-            .filter(|s| s.category == status.category)
-            .count();
-        if count <= 1 {
-            return Err(Error::conflict(format!(
-                "{} is the only status with category {}",
-                status.name, status.category
-            )));
+        let mut stack = self.nodes[&id].children.clone();
+        while let Some(c) = stack.pop() {
+            let node = &self.nodes[&c];
+            if node.item.archived_at.is_some() {
+                continue;
+            }
+            if node.item.done_at.is_none() {
+                return true;
+            }
+            stack.extend(node.children.iter().copied());
         }
-        Ok(())
+        false
     }
 
     fn refresh_subtree(&mut self, start: ItemId) {
@@ -667,20 +588,18 @@ impl Tree {
         while let Some(id) = stack.pop() {
             let node = &self.nodes[&id];
             let archived = node.item.archived_at.is_some();
-            let (path, depth, archived) = match node.item.parent {
-                None => (format!("/{}", node.name), 0, archived),
+            let (path, archived) = match node.item.parent {
+                None => (format!("/{}", node.name), archived),
                 Some(p) => {
                     let parent = &self.nodes[&p];
                     (
                         format!("{}/{}", parent.path, node.name),
-                        parent.depth + 1,
                         parent.archived || archived,
                     )
                 }
             };
             let node = self.nodes.get_mut(&id).expect("id taken from the tree");
             node.path = path.into_boxed_str();
-            node.depth = depth;
             node.archived = archived;
             stack.extend(node.children.iter().copied());
         }
@@ -705,18 +624,7 @@ impl Node {
             item,
             children: Vec::new(),
             path: Box::from(""),
-            depth: 0,
             archived: false,
         }
     }
-}
-
-fn normalize_label(raw: &str) -> Result<String> {
-    let label = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    if label.is_empty() || label.chars().count() > MAX_LABEL_CHARS {
-        return Err(Error::invalid(format!(
-            "status label must be 1 to {MAX_LABEL_CHARS} characters"
-        )));
-    }
-    Ok(label)
 }

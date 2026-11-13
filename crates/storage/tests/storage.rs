@@ -1,7 +1,7 @@
 use jiff::Timestamp;
 use tack_core::ErrorKind;
-use tack_core::api::{CreateItem, CreateStatus, PatchItem};
-use tack_core::model::{Category, ItemId};
+use tack_core::api::{CreateItem, PatchItem};
+use tack_core::model::ItemId;
 use tack_core::path::Target;
 use tack_core::tree::{Tree, Written};
 use tack_storage::Storage;
@@ -97,15 +97,6 @@ fn live_tree_equals_a_fresh_load_after_every_kind_of_write() {
         },
         at(14),
     );
-
-    let status = tree
-        .add_status(&CreateStatus {
-            name: "blocked".into(),
-            category: Category::Active,
-            label: Some("Blocked".into()),
-        })
-        .unwrap();
-    storage.insert_status(tree.status(status).unwrap()).unwrap();
 
     let work = id_of(&tree, "work");
     update(

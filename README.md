@@ -43,7 +43,7 @@ tackd [--addr 0.0.0.0:15470] [--db <file>] [--log <file>] [--allow-host <name>]
 ```
 
 - **database:** `~/.local/share/tack/tack.db`
-- **request log:** `~/.local/state/tack/requests.log`, one JSON line per change
+- **request log:** `~/.local/state/tack/requests.log`, one JSON line per request other than GET
 - **service:** `systemctl status tackd`, `journalctl -u tackd`
 - **allowed hosts:** IP, `localhost`, `$HOSTNAME`, `$HOSTNAME.local`, extend with `--allow-host`
 
@@ -81,7 +81,8 @@ tack server [http://localhost:15470]: myhost
 | Query | Matches |
 |---|---|
 | `milestone` | paths containing the word |
-| `/coding/project-x` | the path and everything under it |
+| `/coding/project-x/` | that item and everything under it |
+| `/coding/project-x` | paths starting with it |
 | `-release` | paths without the word |
 | `+bug`, `tag:bug` | items tagged `bug` |
 | `todo`, `doing`, `done` | items with that status |
@@ -131,6 +132,7 @@ todo   /coding/project-x/milestone_2: rate_limit_login is still open
 ```sh
 sudo systemctl disable --now tackd
 sudo rm /etc/systemd/system/tackd.service
+sudo systemctl daemon-reload
 rm ~/.local/bin/tackd
 ```
 

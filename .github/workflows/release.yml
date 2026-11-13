@@ -26,7 +26,7 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - if: ${{ !matrix.zig }}
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - if: ${{ matrix.zig }}
@@ -45,7 +45,7 @@ jobs:
             cp "target/$TARGET/release/$bin" "dist/$bin-${{ matrix.arch }}-linux"
           done
           file dist/*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.arch }}
           path: dist/*
@@ -54,7 +54,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true

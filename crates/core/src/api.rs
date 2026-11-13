@@ -5,7 +5,7 @@ use jiff::civil::Date;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::ErrorKind;
-use crate::model::{Category, ItemId, Status, Tag};
+use crate::model::{ItemId, Status, Tag};
 
 pub const API_PREFIX: &str = "/api/v1";
 
@@ -24,6 +24,8 @@ pub struct ItemView {
     pub started_at: Option<Timestamp>,
     pub done_at: Option<Timestamp>,
     pub archived_at: Option<Timestamp>,
+    #[serde(default)]
+    pub archived: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,26 +86,6 @@ pub struct TagList {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatchTag {
     pub color: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateStatus {
-    pub name: String,
-    pub category: Category,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PatchStatus {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category: Option<Category>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub position: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

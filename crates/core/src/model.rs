@@ -157,23 +157,6 @@ pub fn normalize_color(raw: &str) -> Result<String> {
     Ok(color.to_owned())
 }
 
-pub const MAX_STATUS_NAME_CHARS: usize = 32;
-
-pub fn normalize_status_name(raw: &str) -> Result<String> {
-    let name = raw.trim().to_lowercase();
-    if name.is_empty()
-        || name.len() > MAX_STATUS_NAME_CHARS
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-    {
-        return Err(Error::invalid(format!(
-            "status name {raw:?} must be 1 to {MAX_STATUS_NAME_CHARS} characters of a to z, 0 to 9 or _"
-        )));
-    }
-    Ok(name)
-}
-
 pub fn whole_seconds(t: Timestamp) -> Timestamp {
     Timestamp::from_second(t.as_second()).expect("truncating keeps the timestamp in range")
 }

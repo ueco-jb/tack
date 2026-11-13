@@ -10,10 +10,10 @@ use axum::routing::{delete, get, patch, post};
 use serde::Deserialize;
 use tack_core::Error;
 use tack_core::api::{
-    API_PREFIX, AllowClient, ClientList, CreateItem, CreateStatus, Deleted, Health, ItemList,
-    ItemView, PatchItem, PatchStatus, PatchTag, StatusList, TagList,
+    API_PREFIX, AllowClient, ClientList, CreateItem, Deleted, Health, ItemList, ItemView,
+    PatchItem, PatchTag, StatusList, TagList,
 };
-use tack_core::model::{Status, Tag};
+use tack_core::model::Tag;
 use tack_core::path::Target;
 
 use crate::error::ApiError;
@@ -26,11 +26,7 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/health", get(health))
         .route("/items", get(list).post(create))
         .route("/items/{*target}", get(show).patch(update).delete(remove))
-        .route("/statuses", get(statuses).post(create_status))
-        .route(
-            "/statuses/{name}",
-            patch(update_status).delete(remove_status),
-        )
+        .route("/statuses", get(statuses))
         .route("/tags", get(tags))
         .route("/tags/{name}", patch(update_tag).delete(remove_tag))
         .route("/clients", get(clients).post(allow_client))
@@ -132,61 +128,6 @@ async fn statuses(State(server): State<Arc<Server>>) -> Json<StatusList> {
     Json(StatusList {
         statuses: server.tree().statuses().to_vec(),
     })
-}
-
-async fn create_status(
-    State(server): State<Arc<Server>>,
-    body: std::result::Result<Json<CreateStatus>, JsonRejection>,
-) -> ApiResult<(StatusCode, Json<Status>)> {
-    let Json(req) = body?;
-    let status = blocking(&server, move |server| {
-        server.write(
-            |tree| tree.add_status(&req),
-            |tree, storage, id| {
-                let status = tree.status(id)?.clone();
-                storage.insert_status(&status)?;
-                Ok(status)
-            },
-        )
-    })
-    .await?;
-    Ok((StatusCode::CREATED, Json(status)))
-}
-
-async fn update_status(
-    State(server): State<Arc<Server>>,
-    name: std::result::Result<extract::Path<String>, PathRejection>,
-    body: std::result::Result<Json<PatchStatus>, JsonRejection>,
-) -> ApiResult<Json<Status>> {
-    let extract::Path(name) = name?;
-    let Json(patch) = body?;
-    let status = blocking(&server, move |server| {
-        server.write(
-            |tree| tree.update_status(&name, &patch),
-            |tree, storage, id| {
-                let status = tree.status(id)?.clone();
-                storage.update_status(&status)?;
-                Ok(status)
-            },
-        )
-    })
-    .await?;
-    Ok(Json(status))
-}
-
-async fn remove_status(
-    State(server): State<Arc<Server>>,
-    name: std::result::Result<extract::Path<String>, PathRejection>,
-) -> ApiResult<StatusCode> {
-    let extract::Path(name) = name?;
-    blocking(&server, move |server| {
-        server.write(
-            |tree| tree.remove_status(&name),
-            |_, storage, id| storage.delete_status(id),
-        )
-    })
-    .await?;
-    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn tags(State(server): State<Arc<Server>>) -> Json<TagList> {
