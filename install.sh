@@ -33,26 +33,23 @@ fetch() {
 mkdir -p "$bin"
 if $server; then
     fetch tackd
-    units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-    mkdir -p "$units"
-    cat > "$units/tackd.service" <<'EOF'
+    sudo tee /etc/systemd/system/tackd.service >/dev/null <<EOF
 [Unit]
 Description=tack task list server
+After=network.target
 
 [Service]
-ExecStart=%h/.local/bin/tackd
+User=$(id -un)
+ExecStart=$bin/tackd
 Restart=on-failure
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
-    systemctl --user daemon-reload
-    systemctl --user enable tackd
-    systemctl --user restart tackd
+    sudo systemctl daemon-reload
+    sudo systemctl enable tackd
+    sudo systemctl restart tackd
     echo "tackd is running on port 15470"
-    if ! loginctl enable-linger "$(id -un)" 2>/dev/null; then
-        echo "to start tackd at boot without logging in, run: sudo loginctl enable-linger $(id -un)"
-    fi
 else
     fetch tack
 fi
