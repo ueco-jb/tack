@@ -5,7 +5,7 @@ Todo tree for the terminal, the browser and coding agents.
 ![tack demo](assets/demo.gif)
 
 ```console
-$ tack add /work/boring_job/fix login
+$ tack add work/boring_job/fix login
 todo  /work/boring_job/fix_login
 
 $ tack ls /work
@@ -14,11 +14,11 @@ todo  /work/boring_job
 todo  /work/boring_job/fix_login
 ```
 
-- **Paths, not lists.** Items nest like files. Missing parents are created on the way, like `mkdir -p`.
-- **Fast.** The tree lives in memory as a hash map of nodes. SQLite only sees writes.
-- **No setup.** Two static binaries, no runtime, no accounts. State is one SQLite file.
-- **Three ways in.** Web UI, CLI and MCP for agents, one server, one query language.
-- **Small.** The web UI is one 33 KB HTML file: no framework, no build step.
+- **paths, not lists.** Items nest like files. Missing parents are created on the way, like `mkdir -p`
+- **fast.** The tree lives in memory as a hash map of nodes. SQLite only sees writes
+- **no setup.** Two static binaries, no runtime, no accounts. State is one SQLite file
+- **three ways in.** Web UI, CLI and MCP for agents, one server, one query language
+- **small.** The web UI is one 33 KB HTML file: no framework, no build step
 
 ## Install
 
@@ -37,6 +37,28 @@ curl -fsSL https://raw.githubusercontent.com/ueco-jb/tack/master/install.sh | sh
 ```
 
 Binaries go to `~/.local/bin`. Rerun to upgrade.
+
+## Server
+
+```
+tackd [--addr 0.0.0.0:15470] [--db <file>] [--log <file>] [--allow-host <name>]
+```
+
+- **database:** `~/.local/share/tack/tack.db`
+- **request log:** `~/.local/state/tack/requests.log`, one JSON line per change
+- **service:** `systemctl --user status tackd`, logs in `journalctl --user -u tackd`
+
+**Access.** Every machine on the network is allowed until you add one to the allowlist. From then on, only listed machines and the server itself get in. Run on the server:
+
+| Command | Does |
+|---|---|
+| `tackd allow` | list |
+| `tackd allow 192.168.1.20` | add a machine |
+| `tackd deny 192.168.1.20` | remove; an empty list allows everyone again |
+
+**Host names.** `tackd` only answers requests addressed to its IP, `localhost`, its hostname or `<hostname>.local`, which blocks DNS rebinding from malicious web pages. Reaching it under another name, like `tack.lan`? Start it with `--allow-host tack.lan`.
+
+**Boot.** User services stop at logout unless lingering is on. The installer enables it, or tells you to run `sudo loginctl enable-linger $USER`.
 
 ## Terminal
 
@@ -84,7 +106,7 @@ Terms combine: `/coding +bug todo`. Without `is:`, archived items are hidden.
 
 ## Agents
 
-`tackd` serves MCP over HTTP at `/mcp`, protocol `2025-11-25`.
+`tackd` serves MCP over HTTP at `/mcp`.
 
 **omp**, in `~/.omp/agent/mcp.json`:
 
@@ -102,29 +124,22 @@ Terms combine: `/coding +bug todo`. Without `is:`, archived items are hidden.
 claude mcp add --scope user --transport http tack http://myhost:15470/mcp
 ```
 
-Then ask the agent to "add fix login to tack under /work/boring_job". Tools: `search`, `get`, `add`, `update`, `delete`, `labels`. The agent is told to search before adding, reuse paths and tags, and keep bodies short.
+Ask in plain words. The agent picks the path and tags:
 
-## Server
+```console
+> add the login redirect bug to tack
+todo   /work/boring_job/fix_login_redirect  +bug
 
+> what's still open in project-x?
+todo   /coding/project-x/milestone_2/rate_limit_login     +api
+doing  /coding/project-x/milestone_2/migrate_users_table  +db
+
+> users table is migrated, close it and the milestone if nothing else is left
+done   /coding/project-x/milestone_2/migrate_users_table  +db
+todo   /coding/project-x/milestone_2: rate_limit_login is still open
 ```
-tackd [--addr 0.0.0.0:15470] [--db <file>] [--log <file>] [--allow-host <name>]
-```
 
-- **Database:** `~/.local/share/tack/tack.db`
-- **Request log:** `~/.local/state/tack/requests.log`, one JSON line per change
-- **Service:** `systemctl --user status tackd`, logs in `journalctl --user -u tackd`
-
-**Access.** Every machine on the network is allowed until you add one to the allowlist. From then on, only listed machines and the server itself get in. Run on the server:
-
-| Command | Does |
-|---|---|
-| `tackd allow` | list |
-| `tackd allow 192.168.1.20` | add a machine |
-| `tackd deny 192.168.1.20` | remove; an empty list allows everyone again |
-
-**Host names.** `tackd` only answers requests addressed to its IP, `localhost`, its hostname or `<hostname>.local`, which blocks DNS rebinding from malicious web pages. Reaching it under another name, like `tack.lan`? Start it with `--allow-host tack.lan`.
-
-**Boot.** User services stop at logout unless lingering is on. The installer enables it, or tells you to run `sudo loginctl enable-linger $USER`.
+Tools: `search`, `get`, `add`, `update`, `delete`, `labels`.
 
 ## Uninstall
 
@@ -135,7 +150,7 @@ systemctl --user disable --now tackd
 rm ~/.local/bin/tackd ~/.config/systemd/user/tackd.service
 ```
 
-The list stays in `~/.local/share/tack` and the request log in `~/.local/state/tack`; delete those too to start over.
+The list stays in `~/.local/share/tack` and the request log in `~/.local/state/tack`. Delete those too to start over.
 
 **Client:**
 
