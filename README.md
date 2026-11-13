@@ -14,29 +14,27 @@ todo  /work/boring_job
 todo  /work/boring_job/fix_login
 ```
 
-- **paths, not lists.** Items nest like files. Missing parents are created on the way, like `mkdir -p`
-- **fast.** The tree lives in memory as a hash map of nodes. SQLite only sees writes
-- **no setup.** Two static binaries, no runtime, no accounts. State is one SQLite file
-- **three ways in.** Web UI, CLI and MCP for agents, one server, one query language
-- **small.** The web UI is one 33 KB HTML file: no framework, no build step
+- **paths, not lists:** Items are addressed like paths, `add` creates parents like `mkdir -p`
+- **fast:** A `HashMap` holds the nodes, with paths and order precomputed on write. DB only sees writes
+- **no setup:** Two static binaries, no runtime, no accounts. State is one SQLite file
+- **three ways in:** webui, CLI and MCP, one query language
+- **small:** The webui is one 33 KB HTML file, no framework, no build step
 
 ## Install
 
-Linux, x86_64 and aarch64.
+Linux, x86_64 and aarch64
 
-**Server.** Installs `tackd` and runs it as a systemd user service on port 15470:
+**Server** `tackd` systemd service on port 15470:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ueco-jb/tack/master/install.sh | sh -s -- --server
 ```
 
-**Client.** Installs `tack`:
+**Client** `tack`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ueco-jb/tack/master/install.sh | sh
 ```
-
-Binaries go to `~/.local/bin`. Rerun to upgrade.
 
 ## Server
 
@@ -46,69 +44,56 @@ tackd [--addr 0.0.0.0:15470] [--db <file>] [--log <file>] [--allow-host <name>]
 
 - **database:** `~/.local/share/tack/tack.db`
 - **request log:** `~/.local/state/tack/requests.log`, one JSON line per change
-- **service:** `systemctl --user status tackd`, logs in `journalctl --user -u tackd`
-
-**Access.** Every machine on the network is allowed until you add one to the allowlist. From then on, only listed machines and the server itself get in. Run on the server:
+- **service:** `systemctl status tackd`, `journalctl -u tackd`
+- **allowed hosts:** IP, `localhost`, `$HOSTNAME`, `$HOSTNAME.local`, extend with `--allow-host`
 
 | Command | Does |
 |---|---|
-| `tackd allow` | list |
-| `tackd allow 192.168.1.20` | add a machine |
-| `tackd deny 192.168.1.20` | remove; an empty list allows everyone again |
-
-**Host names.** `tackd` only answers requests addressed to its IP, `localhost`, its hostname or `<hostname>.local`, which blocks DNS rebinding from malicious web pages. Reaching it under another name, like `tack.lan`? Start it with `--allow-host tack.lan`.
-
-**Boot.** User services stop at logout unless lingering is on. The installer enables it, or tells you to run `sudo loginctl enable-linger $USER`.
+| `tackd allow` | list allowed IPs, empty allows everyone |
+| `tackd allow <ip>` | add an IP, unlisted clients get 403 |
+| `tackd deny <ip>` | remove an IP |
 
 ## Terminal
 
-The first `tack` in a terminal asks for the server once and saves it to `~/.config/tack/server`:
+First run saves the server to `~/.config/tack/server`:
 
 ```console
 $ tack ls
 tack server [http://localhost:15470]: myhost
 ```
 
-`myhost` expands to `http://myhost:15470`. Change it with `tack server <url>`, override one call with `--url`.
-
 | Command | Does |
 |---|---|
+| `tack server [url]` | show or set the server |
 | `tack ls [query]` | list matching items |
 | `tack show <item>` | one item with its body |
-| `tack add <path>` | add; `-b` body, `-t` tag, `-d` due date, `-s` status |
-| `tack done <item>` | mark done; `-f` with open children |
+| `tack add <path>` | add, flags `-b` body, `-t` tag, `-d` due date, `-s` status |
+| `tack done <item>` | mark done, `-f` with open children |
 | `tack mv <item> <path>` | move or rename |
 | `tack set <item>` | change status, body, tags, due date, archive |
-| `tack rm <item>` | delete; `-r` with children |
+| `tack rm <item>` | delete, `-r` with children |
+| `--url <url>` | server for one call |
 
-```console
-$ tack ls /coding
-todo   /coding/project-x
-doing  /coding/project-x/milestone  +api +bug  2026-12-01
-done   /coding/project-x/release
-```
+`<item>` is a path or a numeric id
 
 ## Search
 
-Same query language in the web UI, `tack ls` and MCP.
-
 | Query | Matches |
 |---|---|
-| `login` | paths containing the word |
+| `milestone` | paths containing the word |
 | `/coding/project-x` | the path and everything under it |
-| `-login` | paths without the word |
+| `-release` | paths without the word |
 | `+bug`, `tag:bug` | items tagged `bug` |
 | `todo`, `doing`, `done` | items with that status |
 | `is:open`, `is:done` | open or done items |
 | `is:archived`, `is:all` | archived items, or everything |
-
-Terms combine: `/coding +bug todo`. Without `is:`, archived items are hidden.
+| `/coding +bug todo` | all terms at once |
 
 ## Agents
 
-`tackd` serves MCP over HTTP at `/mcp`.
+MCP over HTTP at `/mcp`, tools `search`, `get`, `add`, `update`, `delete`, `labels`
 
-**omp**, in `~/.omp/agent/mcp.json`:
+**omp** `~/.omp/agent/mcp.json`:
 
 ```json
 {
@@ -124,7 +109,7 @@ Terms combine: `/coding +bug todo`. Without `is:`, archived items are hidden.
 claude mcp add --scope user --transport http tack http://myhost:15470/mcp
 ```
 
-Ask in plain words. The agent picks the path and tags:
+Ask in plain words:
 
 ```console
 > add the login redirect bug to tack
@@ -139,20 +124,23 @@ done   /coding/project-x/milestone_2/migrate_users_table  +db
 todo   /coding/project-x/milestone_2: rate_limit_login is still open
 ```
 
-Tools: `search`, `get`, `add`, `update`, `delete`, `labels`.
-
 ## Uninstall
 
-**Server:**
+**Server**:
 
 ```sh
-systemctl --user disable --now tackd
-rm ~/.local/bin/tackd ~/.config/systemd/user/tackd.service
+sudo systemctl disable --now tackd
+sudo rm /etc/systemd/system/tackd.service
+rm ~/.local/bin/tackd
 ```
 
-The list stays in `~/.local/share/tack` and the request log in `~/.local/state/tack`. Delete those too to start over.
+**Data**:
 
-**Client:**
+```sh
+rm -r ~/.local/share/tack ~/.local/state/tack
+```
+
+**Client**:
 
 ```sh
 rm ~/.local/bin/tack
