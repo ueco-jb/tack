@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -8,8 +7,7 @@ use jiff::Timestamp;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use tack::{Client, item_path};
-use tack_core::api::{CreateItem, Deleted, Health, ItemList, ItemView, PatchItem, StatusList};
-use tack_core::model::Category;
+use tack_core::api::{CreateItem, Deleted, Health, ItemList, ItemView, PatchItem};
 use tack_core::{Error, Result};
 
 const DEFAULT_SERVER: &str = "http://localhost:15470";
@@ -184,16 +182,16 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
         _ => server(flag)?,
     };
     let client = &Client::new(&url);
-    let style = || Style::new(client);
+    let style = Style::new();
     match command {
         Command::Server { .. } => {}
         Command::Ls { query } => {
             let list: ItemList = client.get("/items", &[("q", &query.join(" "))])?;
-            print!("{}", style().lines(&list.items));
+            print!("{}", style.lines(&list.items));
         }
         Command::Show { item } => {
             let item: ItemView = client.get(&item_path(&item.join(" ")), &[])?;
-            print!("{}", style().detail(&item));
+            print!("{}", style.detail(&item));
         }
         Command::Add {
             path,
@@ -210,7 +208,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
                 due,
             };
             let item: ItemView = client.post("/items", &req)?;
-            print!("{}", style().lines(&[item]));
+            print!("{}", style.lines(&[item]));
         }
         Command::Done { item, force } => {
             let patch = PatchItem {
@@ -219,7 +217,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
                 ..PatchItem::default()
             };
             let item: ItemView = client.patch(&item_path(&item.join(" ")), &patch)?;
-            print!("{}", style().lines(&[item]));
+            print!("{}", style.lines(&[item]));
         }
         Command::Mv { item, path } => {
             let patch = PatchItem {
@@ -227,7 +225,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
                 ..PatchItem::default()
             };
             let item: ItemView = client.patch(&item_path(&item), &patch)?;
-            print!("{}", style().lines(&[item]));
+            print!("{}", style.lines(&[item]));
         }
         Command::Set {
             item,
@@ -261,7 +259,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
                 ));
             }
             let item: ItemView = client.patch(&item_path(&item.join(" ")), &patch)?;
-            print!("{}", style().lines(&[item]));
+            print!("{}", style.lines(&[item]));
         }
         Command::Rm { item, recursive } => {
             let recursive = if recursive { "true" } else { "false" };
@@ -273,34 +271,30 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
 }
 
 struct Style {
-    categories: Option<HashMap<String, Category>>,
+    color: bool,
 }
 
 impl Style {
-    fn new(client: &Client) -> Style {
-        let color = std::io::stdout().is_terminal()
-            && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
-        let categories = color
-            .then(|| client.get::<StatusList>("/statuses", &[]).ok())
-            .flatten()
-            .map(|list| {
-                list.statuses
-                    .into_iter()
-                    .map(|s| (s.name, s.category))
-                    .collect()
-            });
-        Style { categories }
+    fn new() -> Style {
+        Style {
+            color: std::io::stdout().is_terminal()
+                && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
+        }
     }
 
     fn status(&self, name: &str, width: usize) -> String {
         let padded = format!("{name:<width$}");
-        let code = match self.categories.as_ref().and_then(|c| c.get(name)) {
-            Some(Category::Todo) => "34",
-            Some(Category::Active) => "33",
-            Some(Category::Done) => "32",
-            None => return padded,
+        let code = match name {
+            "todo" => "34",
+            "doing" => "33",
+            "done" => "32",
+            _ => return padded,
         };
-        format!("\x1b[{code}m{padded}\x1b[0m")
+        if self.color {
+            format!("\x1b[{code}m{padded}\x1b[0m")
+        } else {
+            padded
+        }
     }
 
     fn lines(&self, items: &[ItemView]) -> String {

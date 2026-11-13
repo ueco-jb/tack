@@ -105,6 +105,9 @@ pub fn normalize_tag(raw: &str) -> Result<String> {
     if tag.is_empty() {
         return Err(Error::invalid("tag is empty"));
     }
+    if tag == "." || tag == ".." {
+        return Err(Error::invalid(format!("tag {raw:?} is reserved")));
+    }
     if tag
         .chars()
         .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '+' | ',' | ':' | '"'))
@@ -228,5 +231,6 @@ mod tests {
             vec!["food", "net"]
         );
         assert!(normalize_tag("two words").is_err());
+        assert!(normalize_tag(".").is_err() && normalize_tag("..").is_err());
     }
 }

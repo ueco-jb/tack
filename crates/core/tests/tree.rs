@@ -475,7 +475,14 @@ fn tags_keep_their_color_until_deleted() {
         )
         .unwrap()
         .created[1];
-    let fresh = h.tree.tag("net").unwrap().color.unwrap();
+    let fresh = h
+        .tree
+        .tags()
+        .into_iter()
+        .find(|t| t.name == "net")
+        .unwrap()
+        .color
+        .unwrap();
     assert!(
         TAG_COLORS.contains(&fresh.as_str()),
         "new tags get a palette color"
@@ -490,7 +497,13 @@ fn tags_keep_their_color_until_deleted() {
     )
     .unwrap();
     assert_eq!(
-        h.tree.tag("net").unwrap().color.as_deref(),
+        h.tree
+            .tags()
+            .into_iter()
+            .find(|t| t.name == "net")
+            .unwrap()
+            .color
+            .as_deref(),
         Some("blue"),
         "an unused tag keeps its color"
     );

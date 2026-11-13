@@ -154,16 +154,6 @@ impl Tree {
             .collect()
     }
 
-    pub fn tag(&self, name: &str) -> Result<Tag> {
-        let name = normalize_tag(name)?;
-        let color = self
-            .tags
-            .get(&name)
-            .ok_or_else(|| Error::not_found(format!("no tag {name}")))?
-            .clone();
-        Ok(Tag { name, color })
-    }
-
     pub fn set_tag_color(&mut self, name: &str, color: Option<&str>) -> Result<Tag> {
         let name = normalize_tag(name)?;
         let color = color.map(normalize_color).transpose()?;

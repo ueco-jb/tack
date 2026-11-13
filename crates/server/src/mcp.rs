@@ -329,7 +329,6 @@ fn tools() -> Value {
                 "required": ["item"],
                 "additionalProperties": false,
             },
-            "annotations": { "idempotentHint": true },
         },
         {
             "name": "delete",

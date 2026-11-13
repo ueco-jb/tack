@@ -381,7 +381,8 @@ function highlight(text) {
 
 async function patchItem(item, data) {
   try {
-    await send("PATCH", "/items/" + item.id, data);
+    const updated = await send("PATCH", "/items/" + item.id, data);
+    byId.set(updated.id, updated);
     const title = drafts.get(item.id + ":title");
     if ("path" in data && title !== undefined && data.path === parentPath(item.path) + "/" + title.trim()) drafts.delete(item.id + ":title");
     if ("body" in data && drafts.get(item.id + ":body") === data.body) drafts.delete(item.id + ":body");
