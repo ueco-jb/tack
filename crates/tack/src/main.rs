@@ -8,6 +8,7 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use tack::{Client, item_path};
 use tack_core::api::{CreateItem, Deleted, Health, ItemList, ItemView, PatchItem};
+use tack_core::model::Category;
 use tack_core::{Error, Result};
 
 const DEFAULT_SERVER: &str = "http://localhost:15470";
@@ -282,19 +283,17 @@ impl Style {
         }
     }
 
-    fn status(&self, name: &str, width: usize) -> String {
-        let padded = format!("{name:<width$}");
-        let code = match name {
-            "todo" => "34",
-            "doing" => "33",
-            "done" => "32",
-            _ => return padded,
-        };
-        if self.color {
-            format!("\x1b[{code}m{padded}\x1b[0m")
-        } else {
-            padded
+    fn status(&self, item: &ItemView, width: usize) -> String {
+        let padded = format!("{:<width$}", item.status);
+        if !self.color {
+            return padded;
         }
+        let code = match item.category {
+            Category::Todo => "34",
+            Category::Active => "33",
+            Category::Done => "32",
+        };
+        format!("\x1b[{code}m{padded}\x1b[0m")
     }
 
     fn lines(&self, items: &[ItemView]) -> String {
@@ -309,7 +308,7 @@ impl Style {
             .unwrap_or(0);
         let mut out = String::new();
         for (item, extra) in items.iter().zip(extras) {
-            out.push_str(&self.status(&item.status, status_width));
+            out.push_str(&self.status(item, status_width));
             out.push_str("  ");
             if extra.is_empty() {
                 out.push_str(&item.path);
@@ -324,7 +323,7 @@ impl Style {
     fn detail(&self, item: &ItemView) -> String {
         let mut out = format!("{}\n", item.path);
         let mut field = |name: &str, value: String| out.push_str(&format!("{name:<9}{value}\n"));
-        field("status", self.status(&item.status, 0));
+        field("status", self.status(item, 0));
         if !item.tags.is_empty() {
             field("tags", tags(item));
         }

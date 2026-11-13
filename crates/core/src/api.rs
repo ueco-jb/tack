@@ -5,7 +5,7 @@ use jiff::civil::Date;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::ErrorKind;
-use crate::model::{ItemId, Status, Tag};
+use crate::model::{Category, ItemId, Status, Tag};
 
 pub const API_PREFIX: &str = "/api/v1";
 
@@ -17,6 +17,7 @@ pub struct ItemView {
     pub title: String,
     pub body: String,
     pub status: String,
+    pub category: Category,
     pub tags: Vec<String>,
     pub due: Option<Date>,
     pub created_at: Timestamp,

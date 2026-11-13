@@ -234,6 +234,7 @@ impl Tree {
             title: item.title.clone(),
             body: item.body.clone(),
             status: status.name.clone(),
+            category: status.category,
             tags: item.tags.clone(),
             due: item.due,
             created_at: item.created_at,
