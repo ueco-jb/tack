@@ -1,7 +1,7 @@
 use jiff::Timestamp;
 use tack_core::ErrorKind;
 use tack_core::api::{CreateItem, PatchItem};
-use tack_core::model::ItemId;
+use tack_core::model::{Blocker, ItemId, Status};
 use tack_core::path::Target;
 use tack_core::tree::{Tree, Written};
 use tack_storage::Storage;
@@ -40,13 +40,10 @@ fn update(storage: &mut Storage, tree: &mut Tree, id: ItemId, patch: &PatchItem,
 }
 
 #[test]
-fn fresh_database_is_migrated_and_seeded() {
+fn fresh_database_is_migrated_and_empty() {
     let storage = Storage::open_in_memory().unwrap();
     assert_eq!(storage.schema_version().unwrap(), 1);
-    let tree = storage.load().unwrap();
-    let names: Vec<_> = tree.statuses().iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, ["todo", "doing", "done"]);
-    assert!(tree.is_empty());
+    assert!(storage.load().unwrap().is_empty());
 }
 
 #[test]
@@ -80,7 +77,7 @@ fn live_tree_equals_a_fresh_load_after_every_kind_of_write() {
         renovations,
         &PatchItem {
             path: Some("work/archive/flat".into()),
-            status: Some("doing".into()),
+            status: Some(Status::Doing),
             ..Default::default()
         },
         at(13),
@@ -92,7 +89,7 @@ fn live_tree_equals_a_fresh_load_after_every_kind_of_write() {
         groceries,
         &PatchItem {
             tags: Some(vec!["food".into()]),
-            status: Some("done".into()),
+            status: Some(Status::Done),
             ..Default::default()
         },
         at(14),
@@ -118,9 +115,31 @@ fn live_tree_equals_a_fresh_load_after_every_kind_of_write() {
     add(&mut storage, &mut tree, &create("work/new"), at(16));
     assert_eq!(tree.get(work).unwrap().item.archived_at, None);
 
+    let new = id_of(&tree, "work/new");
+    update(
+        &mut storage,
+        &mut tree,
+        new,
+        &PatchItem {
+            blocked_by: Some(vec![
+                "/home/weekly/buy groceries".into(),
+                "waiting for parts".into(),
+            ]),
+            ..Default::default()
+        },
+        at(17),
+    );
+    assert_eq!(tree, storage.load().unwrap());
+
     let home = id_of(&tree, "home");
     let removed = tree.remove(home, true).unwrap();
     storage.delete_items(&removed).unwrap();
+    let blocked = &tree.get(new).unwrap().item;
+    assert_eq!(blocked.status, Status::Blocked);
+    assert_eq!(
+        blocked.blocked_by,
+        [Blocker::Note("waiting for parts".into())]
+    );
 
     assert_eq!(tree, storage.load().unwrap());
     let paths: Vec<_> = tree.iter().map(|n| n.path.to_string()).collect();

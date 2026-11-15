@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use jiff::Timestamp;
 
-use crate::api::{CreateItem, ItemView, PatchItem};
+use crate::api::{BlockerView, CreateItem, ItemView, PatchItem};
 use crate::model::{
-    Category, Item, ItemId, Status, StatusId, Tag, default_tag_color, normalize_color,
+    Blocker, Item, ItemId, MAX_NOTE_CHARS, Status, Tag, default_tag_color, normalize_color,
     normalize_tag, normalize_tags, transition,
 };
 use crate::path::{ItemPath, MAX_TITLE_CHARS, Target, name_of};
@@ -30,42 +30,21 @@ pub struct Tree {
     nodes: HashMap<ItemId, Node>,
     roots: Vec<ItemId>,
     order: Vec<ItemId>,
-    statuses: Vec<Status>,
     tags: BTreeMap<String, Option<String>>,
     next_item_id: i64,
 }
 
 impl Tree {
-    pub fn new(
-        mut statuses: Vec<Status>,
-        items: Vec<Item>,
-        tags: Vec<Tag>,
-        next_item_id: i64,
-    ) -> Result<Tree> {
-        statuses.sort_by_key(|s| (s.position, s.id));
-        for category in Category::ALL {
-            if !statuses.iter().any(|s| s.category == category) {
-                return Err(Error::internal(format!(
-                    "no status with category {category}"
-                )));
-            }
-        }
+    pub fn new(items: Vec<Item>, tags: Vec<Tag>, next_item_id: i64) -> Result<Tree> {
         let max_id = items.iter().map(|i| i.id.0).max().unwrap_or(0);
         let mut tree = Tree {
             nodes: HashMap::with_capacity(items.len()),
             roots: Vec::new(),
             order: Vec::new(),
-            statuses,
             tags: tags.into_iter().map(|t| (t.name, t.color)).collect(),
             next_item_id: next_item_id.max(max_id + 1),
         };
         for item in items {
-            if !tree.statuses.iter().any(|s| s.id == item.status) {
-                return Err(Error::internal(format!(
-                    "item {} has unknown status {}",
-                    item.id, item.status
-                )));
-            }
             tree.register_tags(&item.tags);
             let id = item.id;
             if tree.nodes.insert(id, Node::detached(item)).is_some() {
@@ -84,6 +63,18 @@ impl Tree {
                     })?
                     .children
                     .push(id),
+            }
+        }
+        for node in tree.nodes.values() {
+            for blocker in &node.item.blocked_by {
+                if let Blocker::Item(b) = blocker
+                    && !tree.nodes.contains_key(b)
+                {
+                    return Err(Error::internal(format!(
+                        "item {} is blocked by unknown item {b}",
+                        node.item.id
+                    )));
+                }
             }
         }
         tree.sort_siblings(None);
@@ -110,38 +101,6 @@ impl Tree {
 
     pub fn next_item_id(&self) -> i64 {
         self.next_item_id
-    }
-
-    pub fn statuses(&self) -> &[Status] {
-        &self.statuses
-    }
-
-    pub fn status(&self, id: StatusId) -> Result<&Status> {
-        self.statuses
-            .iter()
-            .find(|s| s.id == id)
-            .ok_or_else(|| Error::internal(format!("unknown status id {id}")))
-    }
-
-    pub fn status_by_name(&self, name: &str) -> Result<&Status> {
-        let wanted = name.trim().to_lowercase();
-        self.statuses
-            .iter()
-            .find(|s| s.name == wanted)
-            .ok_or_else(|| {
-                let known: Vec<&str> = self.statuses.iter().map(|s| s.name.as_str()).collect();
-                Error::invalid(format!(
-                    "unknown status {name:?}; known: {}",
-                    known.join(", ")
-                ))
-            })
-    }
-
-    pub fn first_status(&self, category: Category) -> Result<&Status> {
-        self.statuses
-            .iter()
-            .find(|s| s.category == category)
-            .ok_or_else(|| Error::internal(format!("no status with category {category}")))
     }
 
     pub fn tags(&self) -> Vec<Tag> {
@@ -225,16 +184,26 @@ impl Tree {
 
     pub fn view(&self, id: ItemId) -> Result<ItemView> {
         let node = self.node(id)?;
-        let status = self.status(node.item.status)?;
         let item = &node.item;
+        let blocked_by = item
+            .blocked_by
+            .iter()
+            .map(|b| match b {
+                Blocker::Item(id) => BlockerView::Item {
+                    id: *id,
+                    path: self.nodes[id].path.to_string(),
+                },
+                Blocker::Note(note) => BlockerView::Note { note: note.clone() },
+            })
+            .collect();
         Ok(ItemView {
             id: item.id,
             parent_id: item.parent,
             path: node.path.to_string(),
             title: item.title.clone(),
             body: item.body.clone(),
-            status: status.name.clone(),
-            category: status.category,
+            status: item.status,
+            blocked_by,
             tags: item.tags.clone(),
             due: item.due,
             created_at: item.created_at,
@@ -248,12 +217,13 @@ impl Tree {
 
     pub fn add(&mut self, req: &CreateItem, now: Timestamp) -> Result<Written> {
         let path = ItemPath::parse(&req.path)?;
-        let status = match &req.status {
-            Some(name) => self.status_by_name(name)?,
-            None => self.first_status(Category::Todo)?,
+        let blocked_by = self.resolve_blockers(None, &req.blocked_by)?;
+        let status = match (req.status, blocked_by.is_empty()) {
+            (Some(s), false) if s != Status::Blocked => return Err(blockers_need_blocked()),
+            (Some(s), _) => s,
+            (None, false) => Status::Blocked,
+            (None, true) => Status::Todo,
         };
-        let (status_id, category) = (status.id, status.category);
-        let default_status = self.first_status(Category::Todo)?.id;
         let tags = normalize_tags(&req.tags)?;
 
         let segments = path.segments();
@@ -261,8 +231,7 @@ impl Tree {
         let (cursor, found) = self.existing_prefix(parents);
         let updated = self.unarchive_ancestors(cursor, now);
 
-        let (parent, mut created) =
-            self.create_parents(cursor, &parents[found..], default_status, now);
+        let (parent, mut created) = self.create_parents(cursor, &parents[found..], now);
         let id = self.take_id();
         let title = self.free_title(parent, path.title(), None);
         self.register_tags(&tags);
@@ -271,12 +240,13 @@ impl Tree {
             parent,
             title,
             body: req.body.clone().unwrap_or_default(),
-            status: status_id,
+            status,
+            blocked_by,
             tags,
             created_at: now,
             updated_at: now,
-            started_at: (category == Category::Active).then_some(now),
-            done_at: (category == Category::Done).then_some(now),
+            started_at: (status == Status::Doing).then_some(now),
+            done_at: (status == Status::Done).then_some(now),
             archived_at: None,
             due: req.due,
         });
@@ -312,23 +282,37 @@ impl Tree {
                 path.title().to_owned()
             };
         }
-        if let Some(name) = &patch.status {
-            let to = self.status_by_name(name)?;
-            if to.id != old.status {
-                let from = self.status(old.status)?;
-                if to.category == Category::Done
-                    && from.category != Category::Done
-                    && !patch.force
-                    && self.has_open_children(id)
-                {
-                    return Err(Error::conflict(format!(
-                        "{} still has open items under it; force it to mark it done anyway",
-                        self.nodes[&id].path
-                    )));
-                }
-                transition(&mut new, from.category, to.category, now);
-                new.status = to.id;
+        let blockers = patch
+            .blocked_by
+            .as_deref()
+            .map(|raw| self.resolve_blockers(Some(id), raw))
+            .transpose()?;
+        let has_blockers = blockers.as_ref().is_some_and(|b| !b.is_empty());
+        let to = match patch.status {
+            Some(s) if has_blockers && s != Status::Blocked => return Err(blockers_need_blocked()),
+            Some(s) => Some(s),
+            None if has_blockers => Some(Status::Blocked),
+            None => None,
+        };
+        if let Some(to) = to
+            && to != old.status
+        {
+            if to == Status::Done
+                && old.status != Status::Done
+                && !patch.force
+                && self.has_open_children(id)
+            {
+                return Err(Error::conflict(format!(
+                    "{} still has open items under it; force it to mark it done anyway",
+                    self.nodes[&id].path
+                )));
             }
+            transition(&mut new, to, now);
+        }
+        if let Some(blockers) = blockers
+            && new.status == Status::Blocked
+        {
+            new.blocked_by = blockers;
         }
         if let Some(body) = &patch.body {
             new.body = body.clone();
@@ -352,15 +336,13 @@ impl Tree {
             });
         }
 
-        let default_status = self.first_status(Category::Todo)?.id;
         let moved = existing_parent != old.parent || !missing_parents.is_empty();
         let mut updated = if moved || unarchive {
             self.unarchive_ancestors(existing_parent, now)
         } else {
             Vec::new()
         };
-        let (parent, created) =
-            self.create_parents(existing_parent, &missing_parents, default_status, now);
+        let (parent, created) = self.create_parents(existing_parent, &missing_parents, now);
         if !missing_parents.is_empty() {
             new.parent = parent;
         }
@@ -409,6 +391,11 @@ impl Tree {
         for gone in &removed {
             self.nodes.remove(gone);
         }
+        for node in self.nodes.values_mut() {
+            node.item
+                .blocked_by
+                .retain(|b| !matches!(b, Blocker::Item(i) if removed.contains(i)));
+        }
         self.rebuild_order();
         Ok(removed)
     }
@@ -423,6 +410,29 @@ impl Tree {
             found += 1;
         }
         (cursor, found)
+    }
+
+    fn resolve_blockers(&self, id: Option<ItemId>, raw: &[String]) -> Result<Vec<Blocker>> {
+        let mut out = Vec::new();
+        for entry in raw.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
+            let blocker = if entry.starts_with('/') {
+                let found = self.find(&Target::Path(ItemPath::parse(entry)?))?.item.id;
+                if Some(found) == id {
+                    return Err(Error::invalid("an item cannot block itself"));
+                }
+                Blocker::Item(found)
+            } else if entry.chars().count() > MAX_NOTE_CHARS {
+                return Err(Error::invalid(format!(
+                    "blocked by note is longer than {MAX_NOTE_CHARS} characters"
+                )));
+            } else {
+                Blocker::Note(entry.to_owned())
+            };
+            if !out.contains(&blocker) {
+                out.push(blocker);
+            }
+        }
+        Ok(out)
     }
 
     fn unarchive_ancestors(&mut self, start: Option<ItemId>, now: Timestamp) -> Vec<ItemId> {
@@ -467,7 +477,6 @@ impl Tree {
         &mut self,
         mut cursor: Option<ItemId>,
         titles: &[String],
-        status: StatusId,
         now: Timestamp,
     ) -> (Option<ItemId>, Vec<ItemId>) {
         let mut created = Vec::with_capacity(titles.len());
@@ -478,7 +487,8 @@ impl Tree {
                 parent: cursor,
                 title: title.clone(),
                 body: String::new(),
-                status,
+                status: Status::Todo,
+                blocked_by: Vec::new(),
                 tags: Vec::new(),
                 created_at: now,
                 updated_at: now,
@@ -618,4 +628,8 @@ impl Node {
             archived: false,
         }
     }
+}
+
+fn blockers_need_blocked() -> Error {
+    Error::invalid("blocked_by needs status blocked")
 }

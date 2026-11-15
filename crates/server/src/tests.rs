@@ -537,7 +537,10 @@ async fn mcp_tools_share_the_rules_of_the_api() {
 
     let labels = h.tool("labels", json!({})).await;
     assert_eq!(labels["structuredContent"]["tags"][0]["name"], "chores");
-    assert_eq!(labels["structuredContent"]["statuses"][1]["name"], "doing");
+    assert_eq!(
+        labels["structuredContent"]["statuses"],
+        json!(["todo", "doing", "blocked", "done"])
+    );
 
     let blocked = h.tool("delete", json!({ "item": "/home" })).await;
     assert_eq!(blocked["isError"], true);

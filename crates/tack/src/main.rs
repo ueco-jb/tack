@@ -7,8 +7,8 @@ use jiff::Timestamp;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use tack::{Client, item_path};
-use tack_core::api::{CreateItem, Deleted, Health, ItemList, ItemView, PatchItem};
-use tack_core::model::Category;
+use tack_core::api::{BlockerView, CreateItem, Deleted, Health, ItemList, ItemView, PatchItem};
+use tack_core::model::Status;
 use tack_core::{Error, Result};
 
 const DEFAULT_SERVER: &str = "http://localhost:15470";
@@ -48,7 +48,12 @@ enum Command {
         #[arg(short, long)]
         due: Option<Date>,
         #[arg(short, long)]
-        status: Option<String>,
+        status: Option<Status>,
+        #[arg(
+            long = "by",
+            help = "Blocked by: a path links that item, other text is a note"
+        )]
+        blocked_by: Vec<String>,
     },
     #[command(about = "Mark an item done")]
     Done {
@@ -64,7 +69,12 @@ enum Command {
         #[arg(required = true)]
         item: Vec<String>,
         #[arg(short, long)]
-        status: Option<String>,
+        status: Option<Status>,
+        #[arg(
+            long = "by",
+            help = "Blocked by: a path links that item, other text is a note"
+        )]
+        blocked_by: Vec<String>,
         #[arg(short, long)]
         body: Option<String>,
         #[arg(short, long = "tag", conflicts_with = "no_tags")]
@@ -200,11 +210,13 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
             tags,
             due,
             status,
+            blocked_by,
         } => {
             let req = CreateItem {
                 path: path.join(" "),
                 body,
                 status,
+                blocked_by,
                 tags,
                 due,
             };
@@ -213,7 +225,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
         }
         Command::Done { item, force } => {
             let patch = PatchItem {
-                status: Some("done".into()),
+                status: Some(Status::Done),
                 force,
                 ..PatchItem::default()
             };
@@ -231,6 +243,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
         Command::Set {
             item,
             status,
+            blocked_by,
             body,
             tags,
             no_tags,
@@ -244,6 +257,7 @@ fn run(flag: Option<String>, command: Command) -> Result<()> {
                 path: None,
                 body,
                 status,
+                blocked_by: (!blocked_by.is_empty()).then_some(blocked_by),
                 tags: (no_tags || !tags.is_empty()).then_some(tags),
                 archived: (archive || unarchive).then_some(archive),
                 due: if no_due { Some(None) } else { due.map(Some) },
@@ -284,21 +298,26 @@ impl Style {
     }
 
     fn status(&self, item: &ItemView, width: usize) -> String {
-        let padded = format!("{:<width$}", item.status);
+        let padded = format!("{:<width$}", item.status.as_str());
         if !self.color {
             return padded;
         }
-        let code = match item.category {
-            Category::Todo => "34",
-            Category::Active => "33",
-            Category::Done => "32",
+        let code = match item.status {
+            Status::Todo => "34",
+            Status::Doing => "33",
+            Status::Blocked => "31",
+            Status::Done => "32",
         };
         format!("\x1b[{code}m{padded}\x1b[0m")
     }
 
     fn lines(&self, items: &[ItemView]) -> String {
         let extras: Vec<String> = items.iter().map(extras).collect();
-        let status_width = items.iter().map(|i| i.status.len()).max().unwrap_or(0);
+        let status_width = items
+            .iter()
+            .map(|i| i.status.as_str().len())
+            .max()
+            .unwrap_or(0);
         let path_width = items
             .iter()
             .zip(&extras)
@@ -324,6 +343,17 @@ impl Style {
         let mut out = format!("{}\n", item.path);
         let mut field = |name: &str, value: String| out.push_str(&format!("{name:<9}{value}\n"));
         field("status", self.status(item, 0));
+        if !item.blocked_by.is_empty() {
+            let by: Vec<&str> = item
+                .blocked_by
+                .iter()
+                .map(|b| match b {
+                    BlockerView::Item { path, .. } => path.as_str(),
+                    BlockerView::Note { note } => note.as_str(),
+                })
+                .collect();
+            field("by", by.join(", "));
+        }
         if !item.tags.is_empty() {
             field("tags", tags(item));
         }

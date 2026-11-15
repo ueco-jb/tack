@@ -1,25 +1,10 @@
 use jiff::Timestamp;
 use tack_core::ErrorKind;
 use tack_core::api::{CreateItem, PatchItem};
-use tack_core::model::{Category, ItemId, Status, StatusId, TAG_COLORS};
+use tack_core::model::{ItemId, Status, TAG_COLORS};
 use tack_core::path::Target;
 use tack_core::query::Query;
 use tack_core::tree::{Tree, Written};
-
-fn seed_statuses() -> Vec<Status> {
-    let status = |id, name: &str, label: &str, category, position| Status {
-        id: StatusId(id),
-        name: name.into(),
-        label: label.into(),
-        category,
-        position,
-    };
-    vec![
-        status(1, "todo", "To do", Category::Todo, 1),
-        status(2, "doing", "Doing", Category::Active, 2),
-        status(3, "done", "Done", Category::Done, 3),
-    ]
-}
 
 struct Harness {
     tree: Tree,
@@ -29,7 +14,7 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         Self {
-            tree: Tree::new(seed_statuses(), vec![], vec![], 1).unwrap(),
+            tree: Tree::new(vec![], vec![], 1).unwrap(),
             clock: 1_000,
         }
     }
@@ -65,7 +50,7 @@ impl Harness {
         self.try_patch(
             target,
             PatchItem {
-                status: Some(status.into()),
+                status: Some(status.parse().unwrap()),
                 ..Default::default()
             },
         )
@@ -104,7 +89,6 @@ impl Harness {
 
     fn assert_matches_rebuild(&self) {
         let rebuilt = Tree::new(
-            self.tree.statuses().to_vec(),
             self.tree.items().cloned().collect(),
             self.tree.tags(),
             self.tree.next_item_id(),
@@ -144,7 +128,7 @@ fn a_rejected_add_changes_nothing() {
         .add(
             &CreateItem {
                 path: "home/garden/beds".into(),
-                status: Some("nope".into()),
+                blocked_by: vec!["note".repeat(60)],
                 ..Default::default()
             },
             now,
@@ -362,7 +346,7 @@ fn done_with_open_children_needs_force_and_archive_hides_the_subtree() {
     h.try_patch(
         "/home/weekly/renovations",
         PatchItem {
-            status: Some("done".into()),
+            status: Some(Status::Done),
             force: true,
             ..Default::default()
         },
@@ -589,7 +573,7 @@ fn status_changes_stamp_times_and_noop_patches_report_no_change() {
         .update(
             id,
             &PatchItem {
-                status: Some("doing".into()),
+                status: Some(Status::Doing),
                 tags: Some(vec!["Net".into()]),
                 ..Default::default()
             },
@@ -727,13 +711,6 @@ fn typed_status_names_and_labels_filter_by_status() {
 }
 
 #[test]
-fn list_reports_unknown_status() {
-    let h = Harness::new();
-    let unknown = h.tree.list(&Query::parse("status:blocked").unwrap());
-    assert_eq!(unknown.unwrap_err().kind, ErrorKind::Invalid);
-}
-
-#[test]
 fn rows_with_a_parent_cycle_are_rejected() {
     let mut h = Harness::new();
     let a = h.add("a");
@@ -744,7 +721,7 @@ fn rows_with_a_parent_cycle_are_rejected() {
             item.parent = Some(b);
         }
     }
-    let err = Tree::new(seed_statuses(), items, vec![], 1).unwrap_err();
+    let err = Tree::new(items, vec![], 1).unwrap_err();
     assert_eq!(err.kind, ErrorKind::Internal);
 }
 
@@ -761,7 +738,6 @@ fn incremental_updates_match_a_full_rebuild() {
     let words = [
         "/home", "/work", "weekly", "kitchen", "garden", "taxes", "car",
     ];
-    let statuses = ["todo", "doing", "done"];
     for step in 0..1_000 {
         let ids: Vec<ItemId> = h.tree.items().map(|i| i.id).collect();
         let pick = |n: usize| ids[n];
@@ -775,7 +751,7 @@ fn incremental_updates_match_a_full_rebuild() {
                 let id = pick(next(ids.len()));
                 let now = h.now();
                 let patch = PatchItem {
-                    status: Some(statuses[next(3)].into()),
+                    status: Some(Status::ALL[next(Status::ALL.len())]),
                     force: next(2) == 0,
                     ..Default::default()
                 };
@@ -831,7 +807,7 @@ fn done_needs_force_while_anything_under_it_is_open() {
     h.try_patch(
         "project/milestone",
         PatchItem {
-            status: Some("done".into()),
+            status: Some(Status::Done),
             force: true,
             ..Default::default()
         },
@@ -841,4 +817,90 @@ fn done_needs_force_while_anything_under_it_is_open() {
     assert_eq!(err.kind, ErrorKind::Conflict, "task is still open");
     h.set_status("project/milestone/task", "done").unwrap();
     h.set_status("project", "done").unwrap();
+}
+
+#[test]
+fn blocked_by_links_paths_keeps_notes_and_clears_on_leaving_blocked() {
+    let mut h = Harness::new();
+    h.add("work/report");
+    h.add("work/review");
+    let blocked_by = |raw: &[&str]| PatchItem {
+        blocked_by: Some(raw.iter().map(|s| s.to_string()).collect()),
+        ..Default::default()
+    };
+    h.try_patch(
+        "work/review",
+        blocked_by(&["/work/report", "legal sign off"]),
+    )
+    .unwrap();
+    let review = h.tree.view(h.id("work/review")).unwrap();
+    assert_eq!(review.status, Status::Blocked);
+    assert_eq!(
+        serde_json::to_value(&review.blocked_by).unwrap(),
+        serde_json::json!([{ "id": h.id("work/report").0, "path": "/work/report" }, { "note": "legal sign off" }])
+    );
+
+    h.try_patch(
+        "work/report",
+        PatchItem {
+            path: Some("work/final report".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let review = h.tree.view(h.id("work/review")).unwrap();
+    assert_eq!(
+        serde_json::to_value(&review.blocked_by).unwrap()[0]["path"],
+        "/work/final_report",
+        "a link follows a rename"
+    );
+
+    let missing = h.try_patch("work/review", blocked_by(&["/work/nothing"]));
+    assert_eq!(missing.unwrap_err().kind, ErrorKind::NotFound);
+    let itself = h.try_patch("work/review", blocked_by(&["/work/review"]));
+    assert_eq!(itself.unwrap_err().kind, ErrorKind::Invalid);
+    let conflicting = h.try_patch(
+        "work/review",
+        PatchItem {
+            status: Some(Status::Doing),
+            blocked_by: Some(vec!["parts".into()]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(conflicting.unwrap_err().kind, ErrorKind::Invalid);
+
+    h.set_status("work/review", "doing").unwrap();
+    assert!(
+        h.tree
+            .view(h.id("work/review"))
+            .unwrap()
+            .blocked_by
+            .is_empty()
+    );
+    h.assert_matches_rebuild();
+}
+
+#[test]
+fn deleting_a_blocker_drops_the_link() {
+    let mut h = Harness::new();
+    h.add("work/report");
+    h.add("work/review");
+    h.try_patch(
+        "work/review",
+        PatchItem {
+            blocked_by: Some(vec!["/work/report".into()]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let report = h.id("work/report");
+    h.tree.remove(report, false).unwrap();
+    let review = h.tree.view(h.id("work/review")).unwrap();
+    assert!(review.blocked_by.is_empty());
+    assert_eq!(
+        review.status,
+        Status::Blocked,
+        "stays blocked until changed"
+    );
+    h.assert_matches_rebuild();
 }

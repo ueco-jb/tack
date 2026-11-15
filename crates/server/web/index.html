@@ -58,13 +58,21 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 
 .chip { --c: var(--todo); min-width: 3.75rem; text-align: center; font: 12px system-ui, sans-serif; color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c) 40%, transparent); border-radius: 999px; padding: 1px 9px; cursor: pointer; white-space: nowrap; justify-self: start; }
 .chip:hover { background: color-mix(in srgb, var(--c) 26%, transparent); }
-.chip.active { --c: var(--active); }
+.chip.doing { --c: var(--active); }
+.chip.blocked { --c: var(--error); }
 .chip.done { --c: var(--done); }
 .chip.done + .path, .chip.done + .main .path { color: color-mix(in srgb, var(--done) 45%, var(--muted)); }
 
 .switch { display: flex; gap: 6px; margin: 4px 0 12px; }
 .switch .chip { padding: 4px 14px; font-size: 13px; opacity: 0.55; }
 .switch .chip.on { opacity: 1; color: var(--bg); background: var(--c); border-color: var(--c); }
+.blockers { display: flex; flex-direction: column; gap: 4px; margin: -4px 0 12px; }
+.blocker { display: flex; align-items: center; gap: 8px; font: 13px var(--mono); }
+.blocker .go { color: var(--accent); background: none; border: none; padding: 0; font: inherit; cursor: pointer; overflow-wrap: anywhere; text-align: left; }
+.blocker .chip { cursor: default; }
+.blocker .x { margin-left: auto; color: var(--muted); background: none; border: none; cursor: pointer; }
+.blockers input { font: 13px var(--mono); color: inherit; background: var(--row); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; }
+.blockers input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 .tags { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
 .tag { --c: #6a737d; display: inline-flex; align-items: center; gap: 4px; font: 12px system-ui, sans-serif; color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c) 40%, transparent); border-radius: 999px; padding: 0 8px; cursor: pointer; white-space: nowrap; }
@@ -164,7 +172,13 @@ dialog p { margin: 0 0 16px; color: var(--muted); }
 "use strict";
 
 const API = "/api/v1";
-const NEXT = { todo: "active", active: "done", done: "todo" };
+const STATUSES = [
+  { name: "todo", label: "To do" },
+  { name: "doing", label: "Doing" },
+  { name: "blocked", label: "Blocked" },
+  { name: "done", label: "Done" },
+];
+const NEXT = { todo: "doing", doing: "done", blocked: "doing", done: "todo" };
 const PALETTE = {
   red: "#d73a49",
   orange: "#e36209",
@@ -189,7 +203,6 @@ const ARCHIVED = "/archived";
 let items = [];
 let listedItems = [];
 let archivedItems = [];
-let statuses = [];
 let tagList = [];
 let byId = new Map();
 let pending = null;
@@ -277,16 +290,12 @@ function parentPath(path) {
   return k < 0 ? "" : path.slice(0, k);
 }
 
-function category(status) {
-  return statuses.find((s) => s.name === status)?.category ?? "todo";
-}
-
 function label(status) {
-  return statuses.find((s) => s.name === status)?.label ?? status;
+  return STATUSES.find((s) => s.name === status)?.label ?? status;
 }
 
 function statusAt(list, i) {
-  for (const s of statuses) {
+  for (const s of STATUSES) {
     for (const phrase of [s.name, s.label.toLowerCase().split(/[\s_]+/).join("_")]) {
       if (list[i] === phrase) return [s.name, 1];
       const parts = phrase.split("_");
@@ -388,7 +397,7 @@ async function patchItem(item, data) {
     if ("body" in data && drafts.get(item.id + ":body") === data.body) drafts.delete(item.id + ":body");
     errorLine.textContent = "";
   } catch (e) {
-    if (e.kind === "conflict" && data.status && category(data.status) === "done" && !data.force
+    if (e.kind === "conflict" && data.status === "done" && !data.force
         && await ask(item.path, "Some items under it are still open. Mark it done anyway? The open items keep their own status.", "Mark done")) {
       return patchItem(item, { ...data, force: true });
     }
@@ -397,30 +406,64 @@ async function patchItem(item, data) {
   await load();
 }
 
-function setCategory(item, cat) {
-  const target = statuses.find((s) => s.category === cat);
-  if (target && target.name !== item.status) return patchItem(item, { status: target.name });
+function setStatus(item, status) {
+  if (status !== item.status) return patchItem(item, { status });
 }
 
 function chip(i) {
-  const cat = category(i.status);
-  const b = el("button", "chip " + cat, label(i.status));
-  b.title = "change to " + label(statuses.find((s) => s.category === NEXT[cat])?.name);
+  const b = el("button", "chip " + i.status, label(i.status));
+  b.title = "change to " + label(NEXT[i.status]);
   b.addEventListener("click", (event) => {
     event.stopPropagation();
-    setCategory(i, NEXT[cat]);
+    setStatus(i, NEXT[i.status]);
   });
   return b;
 }
 
 function switcher(i) {
-  const cat = category(i.status);
-  return el("div", "switch", ...["todo", "active", "done"].map((c) => {
-    const status = statuses.find((s) => s.category === c);
-    const b = el("button", "chip " + c + (c === cat ? " on" : ""), status.label);
-    b.addEventListener("click", () => setCategory(i, c));
+  return el("div", "switch", ...STATUSES.map((s) => {
+    const b = el("button", "chip " + s.name + (s.name === i.status ? " on" : ""), s.label);
+    b.addEventListener("click", () => setStatus(i, s.name));
     return b;
   }));
+}
+
+function blockerEntry(b) {
+  return b.note ?? b.path;
+}
+
+function blockersEditor(i) {
+  const rows = i.blocked_by.map((b, k) => {
+    const parts = [];
+    if (b.note !== undefined) {
+      parts.push(el("span", "", b.note));
+    } else {
+      const go = el("button", "go", b.path);
+      go.addEventListener("click", () => {
+        ui.selectedId = b.id;
+        setSearch([b.path + "/"]);
+      });
+      const status = byId.get(b.id)?.status;
+      parts.push(go);
+      if (status) parts.push(el("span", "chip " + status, label(status)));
+    }
+    const x = el("button", "x", "×");
+    x.title = "remove";
+    x.addEventListener("click", () => patchItem(i, { blocked_by: i.blocked_by.filter((_, n) => n !== k).map(blockerEntry) }));
+    return el("div", "blocker", ...parts, x);
+  });
+  const input = el("input");
+  input.placeholder = "blocked by: /path or a note";
+  input.spellcheck = false;
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && input.value.trim()) {
+      patchItem(i, { blocked_by: [...i.blocked_by.map(blockerEntry), input.value.trim()] });
+    } else if (event.key === "Escape") {
+      input.value = "";
+      input.blur();
+    }
+  });
+  return el("div", "blockers", ...rows, input);
 }
 
 function tagColor(tag) {
@@ -634,7 +677,7 @@ function dueText(due, days) {
 
 function dueLabel(i) {
   const days = daysUntil(i.due);
-  const done = category(i.status) === "done";
+  const done = i.status === "done";
   const label = el("span", "due", dueText(i.due, days));
   label.title = "due " + i.due;
   const heat = done ? 0 : days < 0 ? 85 : Math.round(Math.max(0, Math.min(1, (14 - days) / 14)) * 70);
@@ -721,6 +764,7 @@ function info(i) {
     titleEditor(i),
     el("p", "meta path-line", displayPath(i)),
     switcher(i),
+    i.status === "blocked" ? blockersEditor(i) : "",
     dueEditor(i),
     tagEditor(i),
     bodyEditor(i),
@@ -924,17 +968,11 @@ document.addEventListener("keydown", (event) => {
     }
   } else if (ui.shown && event.key === "x") {
     const item = byId.get(ui.selectedId);
-    if (item) setCategory(item, NEXT[category(item.status)]);
+    if (item) setStatus(item, NEXT[item.status]);
   }
 });
 
 async function start() {
-  try {
-    statuses = (await send("GET", "/statuses")).statuses;
-  } catch (e) {
-    errorLine.textContent = e.message;
-    return;
-  }
   search.value = new URL(location).searchParams.get("q") ?? "";
   await load();
 }

@@ -1,4 +1,4 @@
-use crate::model::{ItemId, StatusId, normalize_tag};
+use crate::model::{ItemId, Status, normalize_tag};
 use crate::path::normalize_word;
 use crate::tree::Tree;
 use crate::{Error, Result};
@@ -17,7 +17,7 @@ pub enum Is {
 pub struct Query {
     pub words: Vec<String>,
     pub without: Vec<String>,
-    pub status: Option<String>,
+    pub status: Option<Status>,
     pub tags: Vec<String>,
     pub is: Is,
 }
@@ -42,7 +42,7 @@ impl Query {
                 }
                 match key.to_lowercase().as_str() {
                     "is" => q.is = parse_is(value)?,
-                    "status" => q.status = Some(value.to_lowercase()),
+                    "status" => q.status = Some(value.parse()?),
                     _ => q.tags.push(normalize_tag(value)?),
                 }
             } else {
@@ -100,12 +100,7 @@ fn tokenize(input: &str) -> Vec<(String, bool)> {
 
 impl Tree {
     pub fn list(&self, query: &Query) -> Result<Vec<ItemId>> {
-        let status = query
-            .status
-            .as_deref()
-            .map(|s| self.status_by_name(s).map(|s| s.id))
-            .transpose()?;
-        let (words, typed_statuses) = self.split_status_words(&query.words);
+        let (words, typed_statuses) = split_status_words(&query.words);
         Ok(self
             .iter()
             .filter(|node| {
@@ -119,7 +114,7 @@ impl Tree {
                 };
                 is && words.iter().all(|w| matches_word(&node.path, w))
                     && !query.without.iter().any(|w| matches_word(&node.path, w))
-                    && status.is_none_or(|s| node.item.status == s)
+                    && query.status.is_none_or(|s| node.item.status == s)
                     && (typed_statuses.is_empty() || typed_statuses.contains(&node.item.status))
                     && query
                         .tags
@@ -129,35 +124,34 @@ impl Tree {
             .map(|node| node.item.id)
             .collect())
     }
+}
 
-    fn split_status_words<'q>(&self, words: &'q [String]) -> (Vec<&'q str>, Vec<StatusId>) {
-        let phrases: Vec<(Vec<String>, StatusId)> = self
-            .statuses()
-            .iter()
-            .flat_map(|s| {
-                [s.name.clone(), normalize_word(&s.label)]
-                    .map(|p| (p.split('_').map(str::to_owned).collect(), s.id))
-            })
-            .collect();
-        let mut rest = Vec::new();
-        let mut found = Vec::new();
-        let mut i = 0;
-        'words: while i < words.len() {
-            for (parts, id) in &phrases {
-                let joined = parts.join("_");
-                let spread = words.len() - i >= parts.len()
-                    && parts.iter().zip(&words[i..]).all(|(p, w)| p == w);
-                if words[i] == joined || spread {
-                    found.push(*id);
-                    i += if words[i] == joined { 1 } else { parts.len() };
-                    continue 'words;
-                }
+fn split_status_words(words: &[String]) -> (Vec<&str>, Vec<Status>) {
+    let phrases: Vec<(Vec<String>, Status)> = Status::ALL
+        .into_iter()
+        .flat_map(|s| {
+            [s.as_str().to_owned(), normalize_word(s.label())]
+                .map(|p| (p.split('_').map(str::to_owned).collect(), s))
+        })
+        .collect();
+    let mut rest = Vec::new();
+    let mut found = Vec::new();
+    let mut i = 0;
+    'words: while i < words.len() {
+        for (parts, status) in &phrases {
+            let joined = parts.join("_");
+            let spread = words.len() - i >= parts.len()
+                && parts.iter().zip(&words[i..]).all(|(p, w)| p == w);
+            if words[i] == joined || spread {
+                found.push(*status);
+                i += if words[i] == joined { 1 } else { parts.len() };
+                continue 'words;
             }
-            rest.push(words[i].as_str());
-            i += 1;
         }
-        (rest, found)
+        rest.push(words[i].as_str());
+        i += 1;
     }
+    (rest, found)
 }
 
 fn matches_word(path: &str, word: &str) -> bool {
@@ -180,7 +174,7 @@ mod tests {
         assert_eq!(q.words, ["weekly", "buy_groceries"]);
         assert_eq!(q.without, ["work"]);
         assert_eq!(q.tags, ["food"]);
-        assert_eq!(q.status.as_deref(), Some("doing"));
+        assert_eq!(q.status, Some(Status::Doing));
         assert_eq!(q.is, Is::All);
     }
 
@@ -199,5 +193,10 @@ mod tests {
     #[test]
     fn invalid_is_value_is_an_error() {
         assert!(Query::parse("is:maybe").is_err());
+    }
+
+    #[test]
+    fn unknown_status_is_an_error() {
+        assert!(Query::parse("status:active").is_err());
     }
 }

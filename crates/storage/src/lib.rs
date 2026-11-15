@@ -4,7 +4,7 @@ use std::path::Path;
 
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use tack_core::model::{Category, Item, ItemId, Status, StatusId, Tag, default_tag_color};
+use tack_core::model::{Blocker, Item, ItemId, Status, Tag, default_tag_color};
 use tack_core::tree::Tree;
 use tack_core::{Error, Result};
 
@@ -74,33 +74,6 @@ impl Storage {
     pub fn load(&self) -> Result<Tree> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, label, category, position FROM status")
-            .map_err(db)?;
-        let statuses = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(db)?
-            .map(|row| {
-                let (id, name, label, category, position) = row.map_err(db)?;
-                Ok(Status {
-                    id: StatusId(id),
-                    name,
-                    label,
-                    category: category.parse::<Category>()?,
-                    position,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut stmt = self
-            .conn
             .prepare("SELECT name, color FROM tag")
             .map_err(db)?;
         let all_tags = stmt
@@ -132,10 +105,39 @@ impl Storage {
             tags.entry(item_id).or_default().push(name);
         }
 
+        let mut blockers: HashMap<i64, Vec<Blocker>> = HashMap::new();
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, parent_id, title, body, status_id, \
+                "SELECT item_id, blocker_id, note FROM item_blocker ORDER BY item_id, position",
+            )
+            .map_err(db)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(db)?;
+        for row in rows {
+            let blocker = match row.map_err(db)? {
+                (item_id, Some(id), _) => (item_id, Blocker::Item(ItemId(id))),
+                (item_id, None, Some(note)) => (item_id, Blocker::Note(note)),
+                (item_id, None, None) => {
+                    return Err(Error::internal(format!(
+                        "item {item_id} has an empty blocker row"
+                    )));
+                }
+            };
+            blockers.entry(blocker.0).or_default().push(blocker.1);
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, parent_id, title, body, status, \
                  created_at, updated_at, started_at, done_at, archived_at, due FROM item",
             )
             .map_err(db)?;
@@ -146,7 +148,7 @@ impl Storage {
                     row.get::<_, Option<i64>>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, Option<i64>>(7)?,
@@ -175,7 +177,8 @@ impl Storage {
                     parent: parent.map(ItemId),
                     title,
                     body,
-                    status: StatusId(status),
+                    status: status.parse::<Status>()?,
+                    blocked_by: blockers.remove(&id).unwrap_or_default(),
                     tags: tags.remove(&id).unwrap_or_default(),
                     created_at: from_secs(created)?,
                     updated_at: from_secs(updated)?,
@@ -197,14 +200,14 @@ impl Storage {
             .optional()
             .map_err(db)?;
 
-        Tree::new(statuses, items, all_tags, last_id.unwrap_or(0) + 1)
+        Tree::new(items, all_tags, last_id.unwrap_or(0) + 1)
     }
 
     pub fn save(&mut self, created: &[&Item], updated: &[&Item]) -> Result<()> {
         let tx = self.conn.transaction().map_err(db)?;
         for item in created {
             tx.execute(
-                "INSERT INTO item (id, parent_id, title, body, status_id, \
+                "INSERT INTO item (id, parent_id, title, body, status, \
                  created_at, updated_at, started_at, done_at, archived_at, due) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
@@ -212,7 +215,7 @@ impl Storage {
                     item.parent.map(|p| p.0),
                     item.title,
                     item.body,
-                    item.status.0,
+                    item.status.as_str(),
                     item.created_at.as_second(),
                     item.updated_at.as_second(),
                     item.started_at.map(|t| t.as_second()),
@@ -223,18 +226,19 @@ impl Storage {
             )
             .map_err(db)?;
             write_tags(&tx, item)?;
+            write_blockers(&tx, item)?;
         }
         for item in updated {
             let count = tx
                 .execute(
-                    "UPDATE item SET parent_id = ?2, title = ?3, body = ?4, status_id = ?5, \
+                    "UPDATE item SET parent_id = ?2, title = ?3, body = ?4, status = ?5, \
                      updated_at = ?6, started_at = ?7, done_at = ?8, archived_at = ?9, due = ?10 WHERE id = ?1",
                     params![
                         item.id.0,
                         item.parent.map(|p| p.0),
                         item.title,
                         item.body,
-                        item.status.0,
+                        item.status.as_str(),
                         item.updated_at.as_second(),
                         item.started_at.map(|t| t.as_second()),
                         item.done_at.map(|t| t.as_second()),
@@ -252,6 +256,9 @@ impl Storage {
             tx.execute("DELETE FROM item_tag WHERE item_id = ?1", [item.id.0])
                 .map_err(db)?;
             write_tags(&tx, item)?;
+            tx.execute("DELETE FROM item_blocker WHERE item_id = ?1", [item.id.0])
+                .map_err(db)?;
+            write_blockers(&tx, item)?;
         }
         tx.commit().map_err(db)
     }
@@ -329,6 +336,21 @@ fn write_tags(tx: &Transaction<'_>, item: &Item) -> Result<()> {
         tx.execute(
             "INSERT INTO item_tag (item_id, tag_id) SELECT ?1, id FROM tag WHERE name = ?2",
             params![item.id.0, tag],
+        )
+        .map_err(db)?;
+    }
+    Ok(())
+}
+
+fn write_blockers(tx: &Transaction<'_>, item: &Item) -> Result<()> {
+    for (position, blocker) in item.blocked_by.iter().enumerate() {
+        let (id, note) = match blocker {
+            Blocker::Item(id) => (Some(id.0), None),
+            Blocker::Note(note) => (None, Some(note.as_str())),
+        };
+        tx.execute(
+            "INSERT INTO item_blocker (item_id, position, blocker_id, note) VALUES (?1, ?2, ?3, ?4)",
+            params![item.id.0, position as i64, id, note],
         )
         .map_err(db)?;
     }

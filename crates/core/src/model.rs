@@ -2,7 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use jiff::Timestamp;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{Error, Result};
 
@@ -10,71 +10,80 @@ use crate::{Error, Result};
 #[serde(transparent)]
 pub struct ItemId(pub i64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct StatusId(pub i64);
-
 impl fmt::Display for ItemId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
-impl fmt::Display for StatusId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Category {
+pub enum Status {
     Todo,
-    Active,
+    Doing,
+    Blocked,
     Done,
 }
 
-impl Category {
-    pub const ALL: [Category; 3] = [Category::Todo, Category::Active, Category::Done];
+impl Status {
+    pub const ALL: [Status; 4] = [Status::Todo, Status::Doing, Status::Blocked, Status::Done];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Category::Todo => "todo",
-            Category::Active => "active",
-            Category::Done => "done",
+            Status::Todo => "todo",
+            Status::Doing => "doing",
+            Status::Blocked => "blocked",
+            Status::Done => "done",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::Todo => "To do",
+            Status::Doing => "Doing",
+            Status::Blocked => "Blocked",
+            Status::Done => "Done",
         }
     }
 }
 
-impl fmt::Display for Category {
+impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl FromStr for Category {
+impl FromStr for Status {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "todo" => Ok(Category::Todo),
-            "active" => Ok(Category::Active),
-            "done" => Ok(Category::Done),
-            other => Err(Error::invalid(format!(
-                "unknown category {other:?}; expected todo, active or done"
-            ))),
-        }
+        let wanted = s.trim().to_lowercase();
+        Status::ALL
+            .into_iter()
+            .find(|status| status.as_str() == wanted)
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "unknown status {s:?}; expected todo, doing, blocked or done"
+                ))
+            })
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Status {
-    pub id: StatusId,
-    pub name: String,
-    pub label: String,
-    pub category: Category,
-    pub position: i64,
+impl<'de> Deserialize<'de> for Status {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: Error| serde::de::Error::custom(e.message))
+    }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Blocker {
+    Item(ItemId),
+    Note(String),
+}
+
+pub const MAX_NOTE_CHARS: usize = 200;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
@@ -82,7 +91,8 @@ pub struct Item {
     pub parent: Option<ItemId>,
     pub title: String,
     pub body: String,
-    pub status: StatusId,
+    pub status: Status,
+    pub blocked_by: Vec<Blocker>,
     pub tags: Vec<String>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -164,15 +174,20 @@ pub fn whole_seconds(t: Timestamp) -> Timestamp {
     Timestamp::from_second(t.as_second()).expect("truncating keeps the timestamp in range")
 }
 
-pub fn transition(item: &mut Item, from: Category, to: Category, now: Timestamp) {
-    if to == Category::Active && from != Category::Active && item.started_at.is_none() {
+pub fn transition(item: &mut Item, to: Status, now: Timestamp) {
+    let from = item.status;
+    if to == Status::Doing && from != Status::Doing && item.started_at.is_none() {
         item.started_at = Some(now);
     }
     match (from, to) {
-        (Category::Done, Category::Done) => {}
-        (_, Category::Done) => item.done_at = Some(now),
+        (Status::Done, Status::Done) => {}
+        (_, Status::Done) => item.done_at = Some(now),
         _ => item.done_at = None,
     }
+    if to != Status::Blocked {
+        item.blocked_by.clear();
+    }
+    item.status = to;
 }
 
 #[cfg(test)]
@@ -185,7 +200,8 @@ mod tests {
             parent: None,
             title: "x".into(),
             body: String::new(),
-            status: StatusId(1),
+            status: Status::Todo,
+            blocked_by: vec![],
             tags: vec![],
             created_at: Timestamp::UNIX_EPOCH,
             updated_at: Timestamp::UNIX_EPOCH,
@@ -201,11 +217,11 @@ mod tests {
         let t1 = Timestamp::from_second(10).unwrap();
         let t2 = Timestamp::from_second(20).unwrap();
         let mut it = item();
-        transition(&mut it, Category::Todo, Category::Active, t1);
+        transition(&mut it, Status::Doing, t1);
         assert_eq!((it.started_at, it.done_at), (Some(t1), None));
-        transition(&mut it, Category::Active, Category::Done, t2);
+        transition(&mut it, Status::Done, t2);
         assert_eq!((it.started_at, it.done_at), (Some(t1), Some(t2)));
-        transition(&mut it, Category::Done, Category::Active, t2);
+        transition(&mut it, Status::Doing, t2);
         assert_eq!((it.started_at, it.done_at), (Some(t1), None));
     }
 
@@ -213,15 +229,20 @@ mod tests {
     fn done_to_done_keeps_original_done_time() {
         let t1 = Timestamp::from_second(10).unwrap();
         let mut it = item();
-        transition(&mut it, Category::Todo, Category::Done, t1);
-        transition(
-            &mut it,
-            Category::Done,
-            Category::Done,
-            Timestamp::from_second(99).unwrap(),
-        );
+        transition(&mut it, Status::Done, t1);
+        transition(&mut it, Status::Done, Timestamp::from_second(99).unwrap());
         assert_eq!(it.done_at, Some(t1));
         assert_eq!(it.started_at, None);
+    }
+
+    #[test]
+    fn leaving_blocked_drops_the_blockers() {
+        let mut it = item();
+        it.status = Status::Blocked;
+        it.blocked_by = vec![Blocker::Note("parts".into())];
+        transition(&mut it, Status::Doing, Timestamp::from_second(10).unwrap());
+        assert!(it.blocked_by.is_empty());
+        assert!(Status::from_str("Blocked").is_ok() && Status::from_str("active").is_err());
     }
 
     #[test]

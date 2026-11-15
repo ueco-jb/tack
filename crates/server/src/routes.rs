@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tack_core::Error;
 use tack_core::api::{
     API_PREFIX, AllowClient, ClientList, CreateItem, Deleted, Health, ItemList, ItemView,
-    PatchItem, PatchTag, StatusList, TagList,
+    PatchItem, PatchTag, TagList,
 };
 use tack_core::model::Tag;
 use tack_core::path::Target;
@@ -26,7 +26,6 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/health", get(health))
         .route("/items", get(list).post(create))
         .route("/items/{*target}", get(show).patch(update).delete(remove))
-        .route("/statuses", get(statuses))
         .route("/tags", get(tags))
         .route("/tags/{name}", patch(update_tag).delete(remove_tag))
         .route("/clients", get(clients).post(allow_client))
@@ -122,12 +121,6 @@ async fn remove(
     })
     .await?;
     Ok(Json(Deleted { deleted }))
-}
-
-async fn statuses(State(server): State<Arc<Server>>) -> Json<StatusList> {
-    Json(StatusList {
-        statuses: server.tree().statuses().to_vec(),
-    })
 }
 
 async fn tags(State(server): State<Arc<Server>>) -> Json<TagList> {

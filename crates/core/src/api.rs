@@ -5,7 +5,7 @@ use jiff::civil::Date;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::ErrorKind;
-use crate::model::{Category, ItemId, Status, Tag};
+use crate::model::{ItemId, Status, Tag};
 
 pub const API_PREFIX: &str = "/api/v1";
 
@@ -16,8 +16,9 @@ pub struct ItemView {
     pub path: String,
     pub title: String,
     pub body: String,
-    pub status: String,
-    pub category: Category,
+    pub status: Status,
+    #[serde(default)]
+    pub blocked_by: Vec<BlockerView>,
     pub tags: Vec<String>,
     pub due: Option<Date>,
     pub created_at: Timestamp,
@@ -27,6 +28,13 @@ pub struct ItemView {
     pub archived_at: Option<Timestamp>,
     #[serde(default)]
     pub archived: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BlockerView {
+    Item { id: ItemId, path: String },
+    Note { note: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +48,9 @@ pub struct CreateItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
+    pub status: Option<Status>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,7 +64,9 @@ pub struct PatchItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
+    pub status: Option<Status>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,11 +84,6 @@ pub struct PatchItem {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deleted {
     pub deleted: Vec<ItemId>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusList {
-    pub statuses: Vec<Status>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

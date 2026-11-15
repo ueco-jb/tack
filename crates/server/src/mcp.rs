@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tack_core::api::{CreateItem, PatchItem};
+use tack_core::model::Status;
 use tack_core::path::Target;
 use tack_core::{Error, Result};
 
@@ -202,15 +203,10 @@ async fn call(server: Arc<Server>, id: Value, params: Value) -> Response {
                 .map(|deleted| json!({ "deleted": deleted })),
             Err(e) => Err(e),
         },
-        "labels" => {
-            let tree = server.tree();
-            Ok(json!({
-                "statuses": tree.statuses().iter().map(|s| json!({
-                    "name": s.name, "label": s.label, "category": s.category,
-                })).collect::<Vec<_>>(),
-                "tags": tree.tags(),
-            }))
-        }
+        "labels" => Ok(json!({
+            "statuses": Status::ALL,
+            "tags": server.tree().tags(),
+        })),
         other => {
             return error(
                 StatusCode::OK,
@@ -259,6 +255,7 @@ fn summary(item: tack_core::api::ItemView) -> Value {
         "id": item.id,
         "path": item.path,
         "status": item.status,
+        "blocked_by": item.blocked_by,
         "tags": item.tags,
         "due": item.due,
         "done": item.done_at.is_some(),
@@ -271,10 +268,16 @@ fn tools() -> Value {
         "type": ["string", "integer"],
         "description": "Path like /coding/project-x/milestone, or numeric id.",
     });
+    let status = json!({ "type": "string", "enum": Status::ALL });
+    let blocked_by = json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Paths link existing items, other text is a note. Sets status blocked.",
+    });
     json!([
         {
             "name": "search",
-            "description": "List items matching a query. Words match the path; /a/b/ matches that item and its subtree, /a/b any path starting with it; -word excludes; +tag; todo, doing, done filter status; is:archived, is:all. Empty query: everything not archived.",
+            "description": "List items matching a query. Words match the path; /a/b/ matches that item and its subtree, /a/b any path starting with it; -word excludes; +tag; todo, doing, blocked, done filter status; is:archived, is:all. Empty query: everything not archived.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -286,7 +289,7 @@ fn tools() -> Value {
         },
         {
             "name": "get",
-            "description": "One item with body, status, tags, due and timestamps.",
+            "description": "One item with body, status, blocked_by, tags, due and timestamps.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "item": item },
@@ -303,7 +306,8 @@ fn tools() -> Value {
                 "properties": {
                     "path": { "type": "string", "description": "Full path." },
                     "body": { "type": "string", "description": "Very short, technical, dry." },
-                    "status": { "type": "string", "description": "Default todo." },
+                    "status": { "type": "string", "enum": Status::ALL, "description": "Default todo." },
+                    "blocked_by": blocked_by.clone(),
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "due": { "type": "string", "format": "date", "description": "YYYY-MM-DD." },
                 },
@@ -313,14 +317,15 @@ fn tools() -> Value {
         },
         {
             "name": "update",
-            "description": "Change only the given fields. path moves; tags replaces the list; due null clears; archived hides the subtree. done with open children needs force.",
+            "description": "Change only the given fields. path moves; tags replaces the list; due null clears; archived hides the subtree. done with open items under it needs force. blocked_by replaces the list; leaving blocked clears it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "item": item,
                     "path": { "type": "string" },
                     "body": { "type": "string", "description": "Very short, technical, dry." },
-                    "status": { "type": "string" },
+                    "status": status,
+                    "blocked_by": blocked_by,
                     "tags": { "type": "array", "items": { "type": "string" } },
                     "due": { "type": ["string", "null"], "format": "date", "description": "YYYY-MM-DD or null." },
                     "archived": { "type": "boolean" },
